@@ -1,7 +1,12 @@
-Django==5.2.6
-djangorestframework==3.16.1
-djangorestframework-simplejwt==5.5.1
+asgiref==3.12.1
+Django==4.2.30
 django-cors-headers==4.9.0
 django-filter==25.1
+djangorestframework==3.16.1
+djangorestframework_simplejwt==5.5.1
+mysqlclient==2.3.0
 psycopg2-binary==2.9.10
+PyJWT==2.14.0
 python-dotenv==1.1.1
+sqlparse==0.6.0
+tzdata==2026.4
