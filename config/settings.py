@@ -24,7 +24,7 @@ SECRET_KEY = os.getenv(
     "dev-secret-key-change-this-in-production"
 )
 
-DEBUG = os.getenv("DEBUG", "True").lower() == "true"
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -34,6 +34,14 @@ ALLOWED_HOSTS = [
     ).split(",")
     if host.strip()
 ]
+
+
+# Application port
+# NOTE:
+# Django does not automatically use this value with runserver.
+# It is mainly kept here so the application configuration has
+# a single place for the configured port.
+APP_PORT = int(os.getenv("APP_PORT", "8003"))
 
 
 # ============================================================
@@ -282,7 +290,7 @@ USE_TZ = True
 # STATIC FILES
 # ============================================================
 
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
 
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
@@ -291,7 +299,7 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # MEDIA FILES
 # ============================================================
 
-MEDIA_URL = "media/"
+MEDIA_URL = "/media/"
 
 MEDIA_ROOT = BASE_DIR / "media"
 
@@ -311,12 +319,29 @@ CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "CORS_ALLOWED_ORIGINS",
-        "http://localhost:3000"
+        "http://localhost:3000,http://127.0.0.1:3000"
     ).split(",")
     if origin.strip()
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+
+# ============================================================
+# CSRF TRUSTED ORIGINS
+#
+# Required when Django is accessed through HTTPS and forms/API
+# requests come from trusted frontend domains.
+# ============================================================
+
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CSRF_TRUSTED_ORIGINS",
+        ""
+    ).split(",")
+    if origin.strip()
+]
 
 
 # ============================================================
@@ -380,13 +405,29 @@ SIMPLE_JWT = {
 
 
 # ============================================================
-# SECURITY SETTINGS
-# These are mainly useful in production.
+# HTTPS / PROXY SECURITY
+# ============================================================
+
+SECURE_SSL_REDIRECT = (
+    os.getenv(
+        "SECURE_SSL_REDIRECT",
+        "False"
+    ).lower() == "true"
+)
+
+
+# Django is behind Nginx in production.
+SECURE_PROXY_SSL_HEADER = (
+    "HTTP_X_FORWARDED_PROTO",
+    "https",
+)
+
+
+# ============================================================
+# PRODUCTION SECURITY
 # ============================================================
 
 if not DEBUG:
-
-    SECURE_BROWSER_XSS_FILTER = True
 
     SECURE_CONTENT_TYPE_NOSNIFF = True
 
@@ -396,23 +437,15 @@ if not DEBUG:
 
     CSRF_COOKIE_SECURE = True
 
+    SESSION_COOKIE_HTTPONLY = True
+
+    CSRF_COOKIE_HTTPONLY = False
+
     SECURE_HSTS_SECONDS = 31536000
 
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
     SECURE_HSTS_PRELOAD = True
-
-
-# ============================================================
-# OPTIONAL PROXY / HTTPS SUPPORT
-#
-# Useful when Django is behind Nginx.
-# ============================================================
-
-SECURE_PROXY_SSL_HEADER = (
-    "HTTP_X_FORWARDED_PROTO",
-    "https",
-)
 
 
 # ============================================================
@@ -423,6 +456,7 @@ LOG_LEVEL = os.getenv(
     "LOG_LEVEL",
     "INFO"
 )
+
 
 LOGGING = {
     "version": 1,
@@ -460,3 +494,4 @@ LOGGING = {
         },
     },
 }
+
