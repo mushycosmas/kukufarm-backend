@@ -1,14 +1,14 @@
 from rest_framework.routers import DefaultRouter
 
-from .views import SaleViewSet
+from .views import SalePaymentViewSet
 
 
 router = DefaultRouter()
 
 router.register(
     "",
-    SaleViewSet,
-    basename="sales",
+    SalePaymentViewSet,
+    basename="sale-payments",
 )
 
 urlpatterns = router.urls
