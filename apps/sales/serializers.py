@@ -12,6 +12,10 @@ from .models import (
 )
 
 
+# ==============================================================
+# SALE ITEM SERIALIZER
+# ==============================================================
+
 class SaleItemSerializer(serializers.ModelSerializer):
     """
     Serializer for individual sale items.
@@ -36,6 +40,7 @@ class SaleItemSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+
         quantity = Decimal(
             attrs.get(
                 "quantity",
@@ -71,15 +76,34 @@ class SaleSerializer(serializers.ModelSerializer):
     """
     Serializer for sales.
 
-    Responsibilities:
-    - Create/update sales
-    - Automatically generate invoice numbers
-    - Calculate subtotal
-    - Calculate total
-    - Calculate balance
-    - Calculate payment status
-    - Validate egg stock
-    - Validate initial payment
+    Handles:
+
+    - Sale creation
+    - Sale updates
+    - Invoice generation
+    - Subtotal calculation
+    - Total calculation
+    - Balance calculation
+    - Payment status
+    - Egg stock validation
+    - Initial payment validation
+
+    IMPORTANT PAYMENT RULE:
+
+    Sale.amount_paid represents the TOTAL amount paid so far.
+
+    Example:
+
+        Sale total = 2,500
+        Initial payment = 500
+
+        amount_paid = 500
+        balance = 2,000
+
+        Additional payment = 1,000
+
+        amount_paid = 1,500
+        balance = 1,000
     """
 
     items = SaleItemSerializer(
@@ -126,9 +150,6 @@ class SaleSerializer(serializers.ModelSerializer):
     # ==========================================================
 
     def get_balance(self, obj):
-        """
-        Return the outstanding balance.
-        """
 
         total = Decimal(
             obj.total or 0
@@ -138,8 +159,10 @@ class SaleSerializer(serializers.ModelSerializer):
             obj.amount_paid or 0
         )
 
+        balance = total - amount_paid
+
         return max(
-            total - amount_paid,
+            balance,
             Decimal("0"),
         )
 
@@ -148,13 +171,6 @@ class SaleSerializer(serializers.ModelSerializer):
     # ==========================================================
 
     def _generate_invoice_number(self):
-        """
-        Generate invoice numbers in the format:
-
-        INV-000001
-        INV-000002
-        INV-000003
-        """
 
         highest = 0
 
@@ -165,6 +181,7 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         for sale in sales:
+
             invoice = str(
                 sale.invoice_no or ""
             )
@@ -173,6 +190,7 @@ class SaleSerializer(serializers.ModelSerializer):
                 continue
 
             try:
+
                 number = int(
                     invoice.replace(
                         "INV-",
@@ -190,16 +208,10 @@ class SaleSerializer(serializers.ModelSerializer):
         return f"INV-{highest + 1:06d}"
 
     # ==========================================================
-    # CALCULATE PAYMENT STATUS
+    # PAYMENT STATUS
     # ==========================================================
 
     def _calculate_payment_status(self, sale):
-        """
-        Determine payment status from:
-
-        total
-        amount_paid
-        """
 
         total = Decimal(
             sale.total or 0
@@ -210,28 +222,24 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         if total <= 0:
+
             return Sale.PaymentStatus.PAID
 
         if amount_paid <= 0:
+
             return Sale.PaymentStatus.UNPAID
 
         if amount_paid >= total:
+
             return Sale.PaymentStatus.PAID
 
         return Sale.PaymentStatus.PARTIAL
 
     # ==========================================================
     # CALCULATE SALE TOTALS
-    # ==========================================================
+    # ==============================================================
 
     def _calculate(self, sale, items):
-        """
-        Calculate:
-
-        subtotal
-        total
-        payment_status
-        """
 
         subtotal = sum(
             (
@@ -269,17 +277,13 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
     # ==========================================================
-    # CONVERT EGG QUANTITY TO INDIVIDUAL EGGS
+    # EGG QUANTITY
     # ==========================================================
 
     def _egg_quantity_in_eggs(self, item):
-        """
-        Convert an egg sale item into individual eggs.
-
-        1 tray = 30 eggs.
-        """
 
         if not item.get("is_egg"):
+
             return Decimal("0")
 
         quantity = Decimal(
@@ -292,6 +296,7 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         if unit == SaleItem.Unit.TRAY:
+
             return quantity * Decimal("30")
 
         return quantity
@@ -301,13 +306,6 @@ class SaleSerializer(serializers.ModelSerializer):
     # ==========================================================
 
     def _get_available_eggs(self):
-        """
-        Available egg stock is:
-
-        Total eggs collected
-        -
-        Total eggs already sold
-        """
 
         from apps.production.models import EggProduction
 
@@ -328,7 +326,9 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         for sale in sales:
+
             for item in sale.items.all():
+
                 total_sold += (
                     self._egg_quantity_in_eggs(
                         {
@@ -353,17 +353,11 @@ class SaleSerializer(serializers.ModelSerializer):
         items,
         current_sale=None,
     ):
-        """
-        Validate that enough eggs are available.
-
-        When editing an existing sale, the eggs
-        from the current sale are returned to
-        stock before validating the new quantity.
-        """
 
         requested_eggs = Decimal("0")
 
         for item in items:
+
             requested_eggs += (
                 self._egg_quantity_in_eggs(
                     item
@@ -371,18 +365,21 @@ class SaleSerializer(serializers.ModelSerializer):
             )
 
         if requested_eggs <= 0:
+
             return
 
         available_eggs = (
             self._get_available_eggs()
         )
 
-        # Return the current sale's eggs to
-        # available stock while editing.
+        # When editing a sale,
+        # return its existing eggs first.
         if current_sale:
+
             for old_item in (
                 current_sale.items.all()
             ):
+
                 available_eggs += (
                     self._egg_quantity_in_eggs(
                         {
@@ -394,6 +391,7 @@ class SaleSerializer(serializers.ModelSerializer):
                 )
 
         if requested_eggs > available_eggs:
+
             raise serializers.ValidationError({
                 "items": (
                     "Insufficient egg stock. "
@@ -403,7 +401,7 @@ class SaleSerializer(serializers.ModelSerializer):
             })
 
     # ==========================================================
-    # VALIDATE PAYMENT
+    # VALIDATE INITIAL PAYMENT
     # ==========================================================
 
     def _validate_payment(
@@ -411,13 +409,6 @@ class SaleSerializer(serializers.ModelSerializer):
         amount_paid,
         total,
     ):
-        """
-        Validate initial payment amount.
-
-        The payment cannot:
-        - be negative
-        - exceed the sale total
-        """
 
         amount_paid = Decimal(
             amount_paid or 0
@@ -428,6 +419,7 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         if amount_paid < 0:
+
             raise serializers.ValidationError({
                 "amount_paid": (
                     "Amount paid cannot be negative."
@@ -435,6 +427,7 @@ class SaleSerializer(serializers.ModelSerializer):
             })
 
         if amount_paid > total:
+
             raise serializers.ValidationError({
                 "amount_paid": (
                     "Amount paid cannot be greater "
@@ -450,11 +443,6 @@ class SaleSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        """
-        Create a new sale.
-
-        Invoice number is generated automatically.
-        """
 
         items = validated_data.pop(
             "items",
@@ -471,10 +459,9 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         # ------------------------------------------------------
-        # CREATE TEMPORARY SALE DATA FOR PAYMENT VALIDATION
+        # VALIDATE EGG STOCK
         # ------------------------------------------------------
 
-        # Validate egg stock before creating anything.
         self._validate_egg_stock(
             items
         )
@@ -498,10 +485,11 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         # ------------------------------------------------------
-        # CREATE SALE ITEMS
+        # CREATE ITEMS
         # ------------------------------------------------------
 
         for item in items:
+
             quantity = Decimal(
                 item["quantity"]
             )
@@ -517,7 +505,7 @@ class SaleSerializer(serializers.ModelSerializer):
             )
 
         # ------------------------------------------------------
-        # CALCULATE TOTALS
+        # CALCULATE TOTAL
         # ------------------------------------------------------
 
         self._calculate(
@@ -526,7 +514,7 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         # ------------------------------------------------------
-        # VALIDATE INITIAL PAYMENT
+        # VALIDATE PAYMENT
         # ------------------------------------------------------
 
         self._validate_payment(
@@ -535,7 +523,7 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         # ------------------------------------------------------
-        # UPDATE PAYMENT STATUS
+        # UPDATE STATUS
         # ------------------------------------------------------
 
         sale.payment_status = (
@@ -563,23 +551,23 @@ class SaleSerializer(serializers.ModelSerializer):
         instance,
         validated_data,
     ):
-        """
-        Update an existing sale.
-
-        Invoice number cannot be changed.
-        """
 
         items = validated_data.pop(
             "items",
             None,
         )
 
-        # ------------------------------------------------------
-        # PROTECT INVOICE NUMBER
-        # ------------------------------------------------------
-
+        # Never allow invoice number changes.
         validated_data.pop(
             "invoice_no",
+            None,
+        )
+
+        # IMPORTANT:
+        # Do not accidentally reset amount_paid
+        # when editing the sale.
+        validated_data.pop(
+            "amount_paid",
             None,
         )
 
@@ -590,6 +578,7 @@ class SaleSerializer(serializers.ModelSerializer):
         for key, value in (
             validated_data.items()
         ):
+
             setattr(
                 instance,
                 key,
@@ -599,22 +588,20 @@ class SaleSerializer(serializers.ModelSerializer):
         instance.save()
 
         # ------------------------------------------------------
-        # UPDATE SALE ITEMS
+        # UPDATE ITEMS
         # ------------------------------------------------------
 
         if items is not None:
-            # Validate egg stock before deleting
-            # existing items.
+
             self._validate_egg_stock(
                 items,
                 current_sale=instance,
             )
 
-            # Remove old items.
             instance.items.all().delete()
 
-            # Create new items.
             for item in items:
+
                 quantity = Decimal(
                     item["quantity"]
                 )
@@ -629,16 +616,12 @@ class SaleSerializer(serializers.ModelSerializer):
                     **item,
                 )
 
-            # Recalculate totals.
             self._calculate(
                 instance,
                 items,
             )
 
         else:
-            # --------------------------------------------------
-            # ITEMS NOT CHANGED
-            # --------------------------------------------------
 
             instance.total = max(
                 Decimal("0"),
@@ -661,7 +644,7 @@ class SaleSerializer(serializers.ModelSerializer):
             )
 
         # ------------------------------------------------------
-        # VALIDATE PAYMENT
+        # VALIDATE CURRENT CUMULATIVE PAYMENT
         # ------------------------------------------------------
 
         self._validate_payment(
@@ -670,7 +653,7 @@ class SaleSerializer(serializers.ModelSerializer):
         )
 
         # ------------------------------------------------------
-        # FINAL PAYMENT STATUS
+        # FINAL STATUS
         # ------------------------------------------------------
 
         instance.payment_status = (
@@ -694,25 +677,25 @@ class SaleSerializer(serializers.ModelSerializer):
 # ==============================================================
 
 class SalePaymentSerializer(serializers.ModelSerializer):
+
     """
-    Serializer for additional payments made against
-    an existing sale.
+    Serializer for additional payments.
+
+    IMPORTANT:
+
+    Sale.amount_paid already contains the cumulative
+    amount paid.
 
     Example:
 
-    Sale:
-        INV-000001
-        Total: 100,000
-        Already Paid: 40,000
-        Balance: 60,000
+        Sale total = 2,500
+        amount_paid = 500
 
-    New SalePayment:
-        Amount: 20,000
+        New payment = 1,000
 
-    New Sale:
-        Total: 100,000
-        Amount Paid: 60,000
-        Balance: 40,000
+        New amount_paid = 1,500
+
+        Balance = 1,000
     """
 
     invoice_no = serializers.CharField(
@@ -726,6 +709,7 @@ class SalePaymentSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
+
         model = SalePayment
 
         fields = [
@@ -755,34 +739,22 @@ class SalePaymentSerializer(serializers.ModelSerializer):
     # ==========================================================
 
     def validate(self, attrs):
-        """
-        Validate an additional payment against
-        the sale's outstanding balance.
-        """
 
-        # ------------------------------------------------------
-        # GET SALE
-        # ------------------------------------------------------
+        sale = attrs.get("sale")
 
-        sale = attrs.get(
-            "sale"
-        )
-
-        # When updating an existing payment,
-        # sale may not be supplied in the request.
+        # When editing an existing payment,
+        # use its existing sale.
         if sale is None and self.instance:
+
             sale = self.instance.sale
 
         if sale is None:
+
             raise serializers.ValidationError({
                 "sale": (
                     "A sale is required for this payment."
                 )
             })
-
-        # ------------------------------------------------------
-        # GET PAYMENT AMOUNT
-        # ------------------------------------------------------
 
         amount = attrs.get(
             "amount",
@@ -800,6 +772,7 @@ class SalePaymentSerializer(serializers.ModelSerializer):
         # ------------------------------------------------------
 
         if amount <= 0:
+
             raise serializers.ValidationError({
                 "amount": (
                     "Payment amount must be greater than zero."
@@ -807,44 +780,48 @@ class SalePaymentSerializer(serializers.ModelSerializer):
             })
 
         # ------------------------------------------------------
-        # GET PREVIOUS PAYMENTS
+        # CURRENT SALE PAYMENT
         # ------------------------------------------------------
 
-        previous_payments = (
-            SalePayment.objects
-            .filter(
-                sale=sale
-            )
-            .aggregate(
-                total=Sum("amount")
-            )["total"]
-            or Decimal("0")
+        current_paid = Decimal(
+            sale.amount_paid or 0
         )
 
-        # When editing an existing payment,
-        # remove its old amount from the
-        # calculation.
+        # ------------------------------------------------------
+        # WHEN EDITING PAYMENT
+        # ------------------------------------------------------
+
         if self.instance:
-            previous_payments -= (
-                Decimal(
-                    self.instance.amount or 0
-                )
+
+            old_amount = Decimal(
+                self.instance.amount or 0
             )
 
+            # Remove the old payment from the
+            # cumulative amount before adding
+            # the new amount.
+
+            current_paid -= old_amount
+
         # ------------------------------------------------------
-        # CALCULATE OUTSTANDING BALANCE
+        # SALE TOTAL
         # ------------------------------------------------------
 
         sale_total = Decimal(
             sale.total or 0
         )
 
+        # ------------------------------------------------------
+        # OUTSTANDING BALANCE
+        # ------------------------------------------------------
+
         outstanding = (
             sale_total
-            - previous_payments
+            - current_paid
         )
 
         if outstanding < 0:
+
             outstanding = Decimal("0")
 
         # ------------------------------------------------------
@@ -852,6 +829,7 @@ class SalePaymentSerializer(serializers.ModelSerializer):
         # ------------------------------------------------------
 
         if amount > outstanding:
+
             raise serializers.ValidationError({
                 "amount": (
                     "Payment amount cannot be greater "

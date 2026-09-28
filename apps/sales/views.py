@@ -1,10 +1,9 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
 from django_filters.rest_framework import DjangoFilterBackend
 
-from rest_framework import permissions, viewsets
+from rest_framework import permissions, serializers, viewsets
 from rest_framework.filters import OrderingFilter, SearchFilter
 
 from .models import Sale, SalePayment
@@ -14,13 +13,24 @@ from .serializers import (
 )
 
 
+# ==============================================================
+# SALE VIEWSET
+# ==============================================================
+
 class SaleViewSet(viewsets.ModelViewSet):
+
     queryset = (
         Sale.objects
         .select_related("customer")
-        .prefetch_related("items", "payments")
+        .prefetch_related(
+            "items",
+            "payments",
+        )
         .all()
-        .order_by("-date", "-id")
+        .order_by(
+            "-date",
+            "-id",
+        )
     )
 
     serializer_class = SaleSerializer
@@ -79,20 +89,34 @@ class SaleViewSet(viewsets.ModelViewSet):
     ]
 
 
+# ==============================================================
+# SALE PAYMENT VIEWSET
+# ==============================================================
+
 class SalePaymentViewSet(viewsets.ModelViewSet):
     """
-    Handles individual payments made against sales.
+    Handles additional payments made against an existing sale.
+
+    IMPORTANT PAYMENT STRUCTURE:
+
+    Sale.amount_paid
+        = cumulative amount paid for the sale.
+
+    SalePayment.amount
+        = individual additional payment transaction.
 
     Example:
 
-    Sale total:       100,000
-    Payment 1:         40,000
-    Payment 2:         30,000
-    Payment 3:         30,000
+        Sale total       = 2,500
+        Initial payment  = 500
 
-    Final amount paid: 100,000
-    Outstanding:             0
-    Status:                PAID
+        Sale.amount_paid = 500
+        Balance          = 2,000
+
+        Additional payment = 1,000
+
+        Sale.amount_paid = 1,500
+        Balance          = 1,000
     """
 
     queryset = (
@@ -102,7 +126,10 @@ class SalePaymentViewSet(viewsets.ModelViewSet):
             "sale__customer",
         )
         .all()
-        .order_by("-date", "-id")
+        .order_by(
+            "-date",
+            "-id",
+        )
     )
 
     serializer_class = SalePaymentSerializer
@@ -155,190 +182,416 @@ class SalePaymentViewSet(viewsets.ModelViewSet):
         "-id",
     ]
 
-    # ------------------------------------------------------------
+    # ==========================================================
+    # HELPER: UPDATE SALE PAYMENT STATUS
+    # ==========================================================
+
+    def _update_sale_payment_status(
+        self,
+        sale,
+    ):
+        """
+        Update payment status based on the cumulative
+        amount already paid.
+
+        Sale.amount_paid is treated as the complete
+        cumulative amount paid for this sale.
+        """
+
+        sale_total = Decimal(
+            sale.total or 0
+        )
+
+        amount_paid = Decimal(
+            sale.amount_paid or 0
+        )
+
+        # Prevent negative amount paid.
+        if amount_paid < 0:
+            amount_paid = Decimal("0")
+
+        # Never allow amount paid to exceed sale total.
+        if amount_paid > sale_total:
+            amount_paid = sale_total
+
+        sale.amount_paid = amount_paid
+
+        # ------------------------------------------------------
+        # PAYMENT STATUS
+        # ------------------------------------------------------
+
+        if sale_total <= 0:
+
+            sale.payment_status = (
+                Sale.PaymentStatus.PAID
+            )
+
+        elif amount_paid <= 0:
+
+            sale.payment_status = (
+                Sale.PaymentStatus.UNPAID
+            )
+
+        elif amount_paid >= sale_total:
+
+            sale.payment_status = (
+                Sale.PaymentStatus.PAID
+            )
+
+        else:
+
+            sale.payment_status = (
+                Sale.PaymentStatus.PARTIAL
+            )
+
+        sale.save(
+            update_fields=[
+                "amount_paid",
+                "payment_status",
+                "updated_at",
+            ]
+        )
+
+        return sale
+
+    # ==========================================================
     # CREATE PAYMENT
-    # ------------------------------------------------------------
+    # ==========================================================
 
     @transaction.atomic
-    def perform_create(self, serializer):
-        payment = serializer.save()
+    def perform_create(
+        self,
+        serializer,
+    ):
+        """
+        Add a new payment to the existing cumulative
+        amount_paid.
 
-        sale = payment.sale
+        Example:
 
-        # Calculate total amount received
-        # from all payments belonging to this sale.
-        total_paid = (
-            SalePayment.objects
-            .filter(
-                sale=sale
+            Existing amount_paid = 500
+            New payment           = 1,000
+
+            New amount_paid       = 1,500
+        """
+
+        # ------------------------------------------------------
+        # LOCK SALE
+        # ------------------------------------------------------
+
+        sale_id = serializer.validated_data.get(
+            "sale"
+        ).id
+
+        sale = (
+            Sale.objects
+            .select_for_update()
+            .get(
+                pk=sale_id
             )
-            .aggregate(
-                total=Sum("amount")
-            )["total"]
-            or Decimal("0")
+        )
+
+        # ------------------------------------------------------
+        # PAYMENT AMOUNT
+        # ------------------------------------------------------
+
+        payment_amount = Decimal(
+            serializer.validated_data.get(
+                "amount",
+                Decimal("0"),
+            )
+        )
+
+        if payment_amount <= 0:
+
+            raise serializers.ValidationError({
+                "amount": (
+                    "Payment amount must be greater "
+                    "than zero."
+                )
+            })
+
+        # ------------------------------------------------------
+        # CURRENT CUMULATIVE PAYMENT
+        # ------------------------------------------------------
+
+        current_paid = Decimal(
+            sale.amount_paid or 0
         )
 
         sale_total = Decimal(
             sale.total or 0
         )
 
-        # Never allow amount paid to exceed
-        # the sale total.
-        total_paid = min(
-            total_paid,
-            sale_total,
+        # ------------------------------------------------------
+        # CURRENT BALANCE
+        # ------------------------------------------------------
+
+        current_balance = (
+            sale_total
+            - current_paid
         )
 
-        sale.amount_paid = total_paid
+        if current_balance < 0:
 
-        # Update payment status.
-        if sale_total <= 0:
-            sale.payment_status = (
-                Sale.PaymentStatus.PAID
-            )
+            current_balance = Decimal("0")
 
-        elif total_paid <= 0:
-            sale.payment_status = (
-                Sale.PaymentStatus.UNPAID
-            )
+        # ------------------------------------------------------
+        # PREVENT OVERPAYMENT
+        # ------------------------------------------------------
 
-        elif total_paid >= sale_total:
-            sale.payment_status = (
-                Sale.PaymentStatus.PAID
-            )
+        if payment_amount > current_balance:
 
-        else:
-            sale.payment_status = (
-                Sale.PaymentStatus.PARTIAL
-            )
+            raise serializers.ValidationError({
+                "amount": (
+                    "Payment amount cannot be greater "
+                    f"than the outstanding balance "
+                    f"of {current_balance}."
+                )
+            })
 
-        sale.save(
-            update_fields=[
-                "amount_paid",
-                "payment_status",
-                "updated_at",
-            ]
+        # ------------------------------------------------------
+        # CREATE PAYMENT
+        # ------------------------------------------------------
+
+        payment = serializer.save(
+            sale=sale
         )
 
-    # ------------------------------------------------------------
+        # ------------------------------------------------------
+        # ADD NEW PAYMENT TO CUMULATIVE AMOUNT
+        # ------------------------------------------------------
+
+        sale.amount_paid = (
+            current_paid
+            + payment_amount
+        )
+
+        # ------------------------------------------------------
+        # UPDATE STATUS
+        # ------------------------------------------------------
+
+        self._update_sale_payment_status(
+            sale
+        )
+
+    # ==========================================================
     # UPDATE PAYMENT
-    # ------------------------------------------------------------
+    # ==========================================================
 
     @transaction.atomic
-    def perform_update(self, serializer):
-        payment = serializer.save()
+    def perform_update(
+        self,
+        serializer,
+    ):
+        """
+        Update an existing payment.
 
-        sale = payment.sale
+        Example:
 
-        # Recalculate all payments after
-        # editing an existing payment.
-        total_paid = (
-            SalePayment.objects
-            .filter(
-                sale=sale
+            Sale total = 2,500
+
+            Existing:
+                Initial payment = 500
+                Payment = 1,000
+
+            amount_paid = 1,500
+
+            Change payment from:
+                1,000 -> 700
+
+            New amount_paid:
+                500 + 700 = 1,200
+
+            New balance:
+                2,500 - 1,200 = 1,300
+        """
+
+        # ------------------------------------------------------
+        # GET EXISTING PAYMENT
+        # ------------------------------------------------------
+
+        payment_instance = self.get_object()
+
+        old_amount = Decimal(
+            payment_instance.amount or 0
+        )
+
+        old_sale_id = (
+            payment_instance.sale_id
+        )
+
+        # ------------------------------------------------------
+        # LOCK SALE
+        # ------------------------------------------------------
+
+        sale = (
+            Sale.objects
+            .select_for_update()
+            .get(
+                pk=old_sale_id
             )
-            .aggregate(
-                total=Sum("amount")
-            )["total"]
-            or Decimal("0")
+        )
+
+        # ------------------------------------------------------
+        # NEW PAYMENT AMOUNT
+        # ------------------------------------------------------
+
+        new_amount = Decimal(
+            serializer.validated_data.get(
+                "amount",
+                old_amount,
+            )
+        )
+
+        if new_amount <= 0:
+
+            raise serializers.ValidationError({
+                "amount": (
+                    "Payment amount must be greater "
+                    "than zero."
+                )
+            })
+
+        # ------------------------------------------------------
+        # CURRENT CUMULATIVE AMOUNT
+        # ------------------------------------------------------
+
+        current_paid = Decimal(
+            sale.amount_paid or 0
         )
 
         sale_total = Decimal(
             sale.total or 0
         )
 
-        total_paid = min(
-            total_paid,
-            sale_total,
+        # ------------------------------------------------------
+        # REMOVE OLD PAYMENT
+        # THEN ADD NEW PAYMENT
+        # ------------------------------------------------------
+
+        new_total_paid = (
+            current_paid
+            - old_amount
+            + new_amount
         )
 
-        sale.amount_paid = total_paid
+        if new_total_paid < 0:
 
-        if sale_total <= 0:
-            sale.payment_status = (
-                Sale.PaymentStatus.PAID
-            )
+            new_total_paid = Decimal("0")
 
-        elif total_paid <= 0:
-            sale.payment_status = (
-                Sale.PaymentStatus.UNPAID
-            )
+        # ------------------------------------------------------
+        # PREVENT OVERPAYMENT
+        # ------------------------------------------------------
 
-        elif total_paid >= sale_total:
-            sale.payment_status = (
-                Sale.PaymentStatus.PAID
-            )
+        if new_total_paid > sale_total:
 
-        else:
-            sale.payment_status = (
-                Sale.PaymentStatus.PARTIAL
-            )
+            raise serializers.ValidationError({
+                "amount": (
+                    "Updated payment would exceed "
+                    f"the sale total of {sale_total}."
+                )
+            })
 
-        sale.save(
-            update_fields=[
-                "amount_paid",
-                "payment_status",
-                "updated_at",
-            ]
+        # ------------------------------------------------------
+        # SAVE PAYMENT
+        # ------------------------------------------------------
+
+        payment = serializer.save(
+            sale=sale
         )
 
-    # ------------------------------------------------------------
+        # ------------------------------------------------------
+        # UPDATE SALE CUMULATIVE PAYMENT
+        # ------------------------------------------------------
+
+        sale.amount_paid = (
+            new_total_paid
+        )
+
+        # ------------------------------------------------------
+        # UPDATE PAYMENT STATUS
+        # ------------------------------------------------------
+
+        self._update_sale_payment_status(
+            sale
+        )
+
+    # ==========================================================
     # DELETE PAYMENT
-    # ------------------------------------------------------------
+    # ==========================================================
 
     @transaction.atomic
-    def perform_destroy(self, instance):
-        sale = instance.sale
+    def perform_destroy(
+        self,
+        instance,
+    ):
+        """
+        Delete an additional payment and subtract
+        it from the cumulative amount_paid.
+
+        Example:
+
+            Sale total = 2,500
+            amount_paid = 1,500
+
+            Delete payment = 1,000
+
+            New amount_paid = 500
+            New balance = 2,000
+        """
+
+        # ------------------------------------------------------
+        # LOCK SALE
+        # ------------------------------------------------------
+
+        sale = (
+            Sale.objects
+            .select_for_update()
+            .get(
+                pk=instance.sale_id
+            )
+        )
+
+        # ------------------------------------------------------
+        # PAYMENT TO REMOVE
+        # ------------------------------------------------------
+
+        deleted_amount = Decimal(
+            instance.amount or 0
+        )
+
+        current_paid = Decimal(
+            sale.amount_paid or 0
+        )
+
+        # ------------------------------------------------------
+        # DELETE PAYMENT
+        # ------------------------------------------------------
 
         instance.delete()
 
-        # Recalculate remaining payments.
-        total_paid = (
-            SalePayment.objects
-            .filter(
-                sale=sale
-            )
-            .aggregate(
-                total=Sum("amount")
-            )["total"]
-            or Decimal("0")
+        # ------------------------------------------------------
+        # SUBTRACT PAYMENT
+        # ------------------------------------------------------
+
+        new_total_paid = (
+            current_paid
+            - deleted_amount
         )
 
-        sale_total = Decimal(
-            sale.total or 0
+        if new_total_paid < 0:
+
+            new_total_paid = Decimal("0")
+
+        sale.amount_paid = (
+            new_total_paid
         )
 
-        total_paid = min(
-            total_paid,
-            sale_total,
-        )
+        # ------------------------------------------------------
+        # UPDATE PAYMENT STATUS
+        # ------------------------------------------------------
 
-        sale.amount_paid = total_paid
-
-        if sale_total <= 0:
-            sale.payment_status = (
-                Sale.PaymentStatus.PAID
-            )
-
-        elif total_paid <= 0:
-            sale.payment_status = (
-                Sale.PaymentStatus.UNPAID
-            )
-
-        elif total_paid >= sale_total:
-            sale.payment_status = (
-                Sale.PaymentStatus.PAID
-            )
-
-        else:
-            sale.payment_status = (
-                Sale.PaymentStatus.PARTIAL
-            )
-
-        sale.save(
-            update_fields=[
-                "amount_paid",
-                "payment_status",
-                "updated_at",
-            ]
+        self._update_sale_payment_status(
+            sale
         )
