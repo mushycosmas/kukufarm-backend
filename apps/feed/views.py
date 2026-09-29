@@ -1,24 +1,24 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 
 from rest_framework import permissions, serializers, viewsets
-from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.response import Response
 
 from .models import (
     Feed,
-    FeedPurchase,
     FeedStock,
+    FeedStockMovement,
     FeedConsumption,
 )
 
 from .serializers import (
     FeedSerializer,
-    FeedPurchaseSerializer,
     FeedStockSerializer,
+    FeedStockMovementSerializer,
     FeedConsumptionSerializer,
 )
 
@@ -28,19 +28,6 @@ from .serializers import (
 # ============================================================
 
 class FeedViewSet(viewsets.ModelViewSet):
-    """
-    Manage feed master records.
-
-    Endpoints:
-        GET     /api/feed/feeds/
-        POST    /api/feed/feeds/
-        GET     /api/feed/feeds/{id}/
-        PATCH   /api/feed/feeds/{id}/
-        PUT     /api/feed/feeds/{id}/
-        DELETE  /api/feed/feeds/{id}/
-
-        GET     /api/feed/feeds/{id}/stock/
-    """
 
     queryset = (
         Feed.objects
@@ -63,12 +50,11 @@ class FeedViewSet(viewsets.ModelViewSet):
 
     search_fields = [
         "name",
-        "feed_type",
+        "description",
         "unit",
     ]
 
     filterset_fields = [
-        "feed_type",
         "unit",
         "active",
     ]
@@ -76,9 +62,7 @@ class FeedViewSet(viewsets.ModelViewSet):
     ordering_fields = [
         "id",
         "name",
-        "feed_type",
         "minimum_stock",
-        "unit_cost",
     ]
 
     ordering = [
@@ -86,74 +70,33 @@ class FeedViewSet(viewsets.ModelViewSet):
     ]
 
     def perform_create(self, serializer):
-        """
-        Create feed and automatically create its stock record.
-        """
 
-        feed = serializer.save()
+        with transaction.atomic():
 
-        FeedStock.objects.get_or_create(
-            feed=feed,
-            defaults={
-                "quantity": Decimal("0"),
-            },
-        )
+            feed = serializer.save()
 
-    @action(
-        detail=True,
-        methods=["get"],
-        url_path="stock",
-    )
-    def stock(self, request, pk=None):
-        """
-        Get stock for a specific feed.
-        """
-
-        feed = self.get_object()
-
-        stock, _ = FeedStock.objects.get_or_create(
-            feed=feed,
-            defaults={
-                "quantity": Decimal("0"),
-            },
-        )
-
-        return Response(
-            FeedStockSerializer(stock).data
-        )
+            FeedStock.objects.get_or_create(
+                feed=feed,
+                defaults={
+                    "quantity": Decimal("0"),
+                },
+            )
 
 
 # ============================================================
-# FEED PURCHASE
+# FEED STOCK
 # ============================================================
 
-class FeedPurchaseViewSet(viewsets.ModelViewSet):
-    """
-    Manage feed purchases.
-
-    Creating a purchase increases feed stock.
-
-    Endpoints:
-        GET     /api/feed/purchases/
-        POST    /api/feed/purchases/
-        GET     /api/feed/purchases/{id}/
-        PATCH   /api/feed/purchases/{id}/
-        PUT     /api/feed/purchases/{id}/
-        DELETE  /api/feed/purchases/{id}/
-    """
+class FeedStockViewSet(viewsets.ModelViewSet):
 
     queryset = (
-        FeedPurchase.objects
-        .select_related(
-            "feed",
-            "supplier",
-            "created_by",
-        )
+        FeedStock.objects
+        .select_related("feed")
         .all()
-        .order_by("-date", "-id")
+        .order_by("feed__name")
     )
 
-    serializer_class = FeedPurchaseSerializer
+    serializer_class = FeedStockSerializer
 
     permission_classes = [
         permissions.IsAuthenticated,
@@ -167,47 +110,88 @@ class FeedPurchaseViewSet(viewsets.ModelViewSet):
 
     filterset_fields = [
         "feed",
-        "supplier",
-        "date",
     ]
 
     search_fields = [
         "feed__name",
-        "reference",
     ]
 
     ordering_fields = [
-        "id",
-        "date",
         "quantity",
-        "unit_cost",
-        "total",
+        "last_updated",
     ]
 
     ordering = [
-        "-date",
-        "-id",
+        "feed__name",
     ]
 
-    def perform_create(self, serializer):
-        """
-        Create purchase and increase stock.
-        """
+    # --------------------------------------------------------
+    # ADD STOCK
+    # POST /api/feed/stock/
+    # --------------------------------------------------------
+
+    def create(self, request, *args, **kwargs):
 
         with transaction.atomic():
 
-            feed = serializer.validated_data["feed"]
+            feed_id = request.data.get("feed")
+            quantity = request.data.get("quantity")
 
-            quantity = serializer.validated_data["quantity"]
+            # ------------------------------------------------
+            # VALIDATE FEED
+            # ------------------------------------------------
 
-            unit_cost = serializer.validated_data["unit_cost"]
+            if not feed_id:
 
-            total = quantity * unit_cost
+                raise serializers.ValidationError({
+                    "feed": "Feed is required."
+                })
 
-            serializer.save(
-                total=total,
-                created_by=self.request.user,
-            )
+            try:
+
+                feed = Feed.objects.get(
+                    pk=feed_id
+                )
+
+            except Feed.DoesNotExist:
+
+                raise serializers.ValidationError({
+                    "feed": "Selected feed does not exist."
+                })
+
+            # ------------------------------------------------
+            # VALIDATE QUANTITY
+            # ------------------------------------------------
+
+            if quantity in [None, ""]:
+
+                raise serializers.ValidationError({
+                    "quantity": "Quantity is required."
+                })
+
+            try:
+
+                quantity = Decimal(
+                    str(quantity)
+                )
+
+            except Exception:
+
+                raise serializers.ValidationError({
+                    "quantity": "Enter a valid quantity."
+                })
+
+            if quantity <= 0:
+
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Quantity must be greater than zero."
+                    )
+                })
+
+            # ------------------------------------------------
+            # GET / CREATE STOCK
+            # ------------------------------------------------
 
             stock, _ = (
                 FeedStock.objects
@@ -220,38 +204,407 @@ class FeedPurchaseViewSet(viewsets.ModelViewSet):
                 )
             )
 
+            # ------------------------------------------------
+            # ADD STOCK
+            # ------------------------------------------------
+
             stock.quantity += quantity
 
             stock.save()
 
+            # ------------------------------------------------
+            # CREATE MOVEMENT
+            # ------------------------------------------------
 
-    def perform_update(self, serializer):
-        """
-        Update purchase and correctly adjust stock.
+            movement_date = request.data.get("date")
 
-        Example:
+            if not movement_date:
+                movement_date = timezone.now().date()
 
-        Old:
-            Layer Mash = 100kg
+            FeedStockMovement.objects.create(
+                feed=feed,
+                movement_type="STOCK_IN",
+                date=movement_date,
+                quantity=quantity,
+                reference=request.data.get(
+                    "reference",
+                    "",
+                ),
+                notes=request.data.get(
+                    "notes",
+                    "",
+                ),
+                created_by=request.user,
+            )
 
-        Change purchase:
-            100kg -> 150kg
+            # ------------------------------------------------
+            # RESPONSE
+            # ------------------------------------------------
 
-        Stock becomes:
-            Stock - 100 + 150
-        """
+            serializer = self.get_serializer(
+                stock
+            )
+
+            return Response(
+                serializer.data,
+                status=201,
+            )
+
+    # --------------------------------------------------------
+    # UPDATE STOCK
+    # --------------------------------------------------------
+
+    def update(
+        self,
+        request,
+        *args,
+        **kwargs
+    ):
 
         with transaction.atomic():
 
-            old_purchase = self.get_object()
+            stock = (
+                FeedStock.objects
+                .select_for_update()
+                .select_related("feed")
+                .get(
+                    pk=kwargs.get("pk")
+                )
+            )
 
-            old_feed = old_purchase.feed
+            quantity = request.data.get(
+                "quantity"
+            )
 
-            old_quantity = old_purchase.quantity
+            if quantity in [None, ""]:
+
+                raise serializers.ValidationError({
+                    "quantity": "Quantity is required."
+                })
+
+            try:
+
+                new_quantity = Decimal(
+                    str(quantity)
+                )
+
+            except Exception:
+
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Enter a valid quantity."
+                    )
+                })
+
+            if new_quantity < 0:
+
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Quantity cannot be negative."
+                    )
+                })
+
+            old_quantity = stock.quantity
+
+            # Nothing changed
+            if new_quantity == old_quantity:
+
+                serializer = self.get_serializer(
+                    stock
+                )
+
+                return Response(
+                    serializer.data
+                )
+
+            difference = (
+                new_quantity -
+                old_quantity
+            )
+
+            # ------------------------------------------------
+            # STOCK IN
+            # ------------------------------------------------
+
+            if difference > 0:
+
+                FeedStockMovement.objects.create(
+                    feed=stock.feed,
+                    movement_type="STOCK_IN",
+                    date=request.data.get(
+                        "date"
+                    ) or timezone.now().date(),
+                    quantity=difference,
+                    reference=request.data.get(
+                        "reference",
+                        "",
+                    ),
+                    notes=request.data.get(
+                        "notes",
+                        "Stock quantity increased.",
+                    ),
+                    created_by=request.user,
+                )
+
+            # ------------------------------------------------
+            # STOCK ADJUSTMENT
+            # ------------------------------------------------
+
+            else:
+
+                adjustment_quantity = abs(
+                    difference
+                )
+
+                FeedStockMovement.objects.create(
+                    feed=stock.feed,
+                    movement_type="ADJUSTMENT",
+                    date=request.data.get(
+                        "date"
+                    ) or timezone.now().date(),
+                    quantity=adjustment_quantity,
+                    reference=request.data.get(
+                        "reference",
+                        "",
+                    ),
+                    notes=request.data.get(
+                        "notes",
+                        "Stock quantity adjusted downward.",
+                    ),
+                    created_by=request.user,
+                )
+
+            stock.quantity = new_quantity
+
+            stock.save()
+
+            serializer = self.get_serializer(
+                stock
+            )
+
+            return Response(
+                serializer.data
+            )
+
+    # --------------------------------------------------------
+    # PATCH
+    # --------------------------------------------------------
+
+    def partial_update(
+        self,
+        request,
+        *args,
+        **kwargs
+    ):
+
+        return self.update(
+            request,
+            *args,
+            **kwargs
+        )
+
+    # --------------------------------------------------------
+    # DELETE
+    # --------------------------------------------------------
+
+    def perform_destroy(self, instance):
+
+        with transaction.atomic():
+
+            stock = (
+                FeedStock.objects
+                .select_for_update()
+                .get(
+                    pk=instance.pk
+                )
+            )
+
+            if stock.quantity != 0:
+
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Stock record cannot be deleted "
+                        "while quantity is greater than zero."
+                    )
+                })
+
+            stock.delete()
+
+
+# ============================================================
+# FEED STOCK MOVEMENTS
+# ============================================================
+
+class FeedStockMovementViewSet(
+    viewsets.ModelViewSet
+):
+
+    queryset = (
+        FeedStockMovement.objects
+        .select_related(
+            "feed",
+            "flock",
+            "created_by",
+        )
+        .all()
+        .order_by(
+            "-date",
+            "-id",
+        )
+    )
+
+    serializer_class = FeedStockMovementSerializer
+
+    permission_classes = [
+        permissions.IsAuthenticated,
+    ]
+
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+
+    filterset_fields = [
+        "feed",
+        "movement_type",
+        "flock",
+        "date",
+    ]
+
+    search_fields = [
+        "feed__name",
+        "reference",
+        "notes",
+        "flock__name",
+        "flock__code",
+    ]
+
+    ordering_fields = [
+        "id",
+        "date",
+        "quantity",
+        "movement_type",
+    ]
+
+    ordering = [
+        "-date",
+        "-id",
+    ]
+
+    # --------------------------------------------------------
+    # CREATE MOVEMENT
+    # --------------------------------------------------------
+
+    def perform_create(self, serializer):
+
+        with transaction.atomic():
+
+            feed = serializer.validated_data[
+                "feed"
+            ]
+
+            movement_type = serializer.validated_data[
+                "movement_type"
+            ]
+
+            quantity = serializer.validated_data[
+                "quantity"
+            ]
+
+            if quantity <= 0:
+
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Quantity must be greater than zero."
+                    )
+                })
+
+            stock, _ = (
+                FeedStock.objects
+                .select_for_update()
+                .get_or_create(
+                    feed=feed,
+                    defaults={
+                        "quantity": Decimal("0"),
+                    },
+                )
+            )
+
+            # ------------------------------------------------
+            # CONSUMPTION
+            # ------------------------------------------------
+
+            if movement_type == "CONSUMPTION":
+
+                if stock.quantity < quantity:
+
+                    raise serializers.ValidationError({
+                        "quantity": (
+                            f"Insufficient stock. "
+                            f"Available: "
+                            f"{stock.quantity} "
+                            f"{feed.unit}."
+                        )
+                    })
+
+                stock.quantity -= quantity
+
+            # ------------------------------------------------
+            # STOCK ADDITIONS
+            # ------------------------------------------------
+
+            elif movement_type in [
+                "STOCK_IN",
+                "OPENING_STOCK",
+            ]:
+
+                stock.quantity += quantity
+
+            # ------------------------------------------------
+            # ADJUSTMENT
+            # ------------------------------------------------
+
+            elif movement_type == "ADJUSTMENT":
+
+                stock.quantity += quantity
+
+            else:
+
+                raise serializers.ValidationError({
+                    "movement_type": (
+                        "Invalid stock movement type."
+                    )
+                })
+
+            stock.save()
+
+            serializer.save(
+                created_by=self.request.user
+            )
+
+    # --------------------------------------------------------
+    # UPDATE MOVEMENT
+    # --------------------------------------------------------
+
+    def perform_update(self, serializer):
+
+        with transaction.atomic():
+
+            old_movement = self.get_object()
+
+            old_feed = old_movement.feed
+            old_type = old_movement.movement_type
+            old_quantity = old_movement.quantity
 
             new_feed = serializer.validated_data.get(
                 "feed",
                 old_feed,
+            )
+
+            new_type = serializer.validated_data.get(
+                "movement_type",
+                old_type,
             )
 
             new_quantity = serializer.validated_data.get(
@@ -259,14 +612,17 @@ class FeedPurchaseViewSet(viewsets.ModelViewSet):
                 old_quantity,
             )
 
-            new_unit_cost = serializer.validated_data.get(
-                "unit_cost",
-                old_purchase.unit_cost,
-            )
+            if new_quantity <= 0:
 
-            # ------------------------------------------------
-            # OLD FEED STOCK
-            # ------------------------------------------------
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Quantity must be greater than zero."
+                    )
+                })
+
+            # =================================================
+            # RESTORE OLD MOVEMENT
+            # =================================================
 
             old_stock, _ = (
                 FeedStock.objects
@@ -279,65 +635,81 @@ class FeedPurchaseViewSet(viewsets.ModelViewSet):
                 )
             )
 
-            # Prevent stock from becoming negative.
-            if old_stock.quantity < old_quantity:
-                raise serializers.ValidationError(
-                    {
-                        "quantity": (
-                            "Cannot edit this purchase because "
-                            "current stock is lower than the "
-                            "original purchase quantity."
-                        )
-                    }
-                )
+            if old_type == "CONSUMPTION":
 
-            # Remove old purchase quantity.
-            old_stock.quantity -= old_quantity
-
-            old_stock.save()
-
-            # ------------------------------------------------
-            # NEW FEED
-            # ------------------------------------------------
-
-            if new_feed != old_feed:
-
-                new_stock, _ = (
-                    FeedStock.objects
-                    .select_for_update()
-                    .get_or_create(
-                        feed=new_feed,
-                        defaults={
-                            "quantity": Decimal("0"),
-                        },
-                    )
-                )
-
-                new_stock.quantity += new_quantity
-
-                new_stock.save()
+                old_stock.quantity += old_quantity
 
             else:
 
-                old_stock.quantity += new_quantity
+                if old_stock.quantity < old_quantity:
 
-                old_stock.save()
+                    raise serializers.ValidationError({
+                        "quantity": (
+                            "Cannot update this movement "
+                            "because current stock is lower "
+                            "than the original movement."
+                        )
+                    })
 
-            # ------------------------------------------------
-            # UPDATE PURCHASE
-            # ------------------------------------------------
+                old_stock.quantity -= old_quantity
 
-            total = new_quantity * new_unit_cost
+            old_stock.save()
 
-            serializer.save(
-                total=total,
+            # =================================================
+            # APPLY NEW MOVEMENT
+            # =================================================
+
+            new_stock, _ = (
+                FeedStock.objects
+                .select_for_update()
+                .get_or_create(
+                    feed=new_feed,
+                    defaults={
+                        "quantity": Decimal("0"),
+                    },
+                )
             )
 
+            if new_type == "CONSUMPTION":
+
+                if new_stock.quantity < new_quantity:
+
+                    raise serializers.ValidationError({
+                        "quantity": (
+                            f"Insufficient stock. "
+                            f"Available: "
+                            f"{new_stock.quantity} "
+                            f"{new_feed.unit}."
+                        )
+                    })
+
+                new_stock.quantity -= new_quantity
+
+            elif new_type in [
+                "STOCK_IN",
+                "OPENING_STOCK",
+                "ADJUSTMENT",
+            ]:
+
+                new_stock.quantity += new_quantity
+
+            else:
+
+                raise serializers.ValidationError({
+                    "movement_type": (
+                        "Invalid stock movement type."
+                    )
+                })
+
+            new_stock.save()
+
+            serializer.save()
+
+    # --------------------------------------------------------
+    # DELETE MOVEMENT
+    # --------------------------------------------------------
 
     def perform_destroy(self, instance):
-        """
-        Delete purchase and remove its quantity from stock.
-        """
 
         with transaction.atomic():
 
@@ -352,18 +724,23 @@ class FeedPurchaseViewSet(viewsets.ModelViewSet):
                 )
             )
 
-            if stock.quantity < instance.quantity:
-                raise serializers.ValidationError(
-                    {
-                        "quantity": (
-                            "Cannot delete this purchase because "
-                            "current stock is lower than the "
-                            "purchase quantity."
-                        )
-                    }
-                )
+            if instance.movement_type == "CONSUMPTION":
 
-            stock.quantity -= instance.quantity
+                stock.quantity += instance.quantity
+
+            else:
+
+                if stock.quantity < instance.quantity:
+
+                    raise serializers.ValidationError({
+                        "quantity": (
+                            "Cannot delete this movement "
+                            "because current stock is lower "
+                            "than the movement quantity."
+                        )
+                    })
+
+                stock.quantity -= instance.quantity
 
             stock.save()
 
@@ -374,20 +751,9 @@ class FeedPurchaseViewSet(viewsets.ModelViewSet):
 # FEED CONSUMPTION
 # ============================================================
 
-class FeedConsumptionViewSet(viewsets.ModelViewSet):
-    """
-    Manage feed consumption.
-
-    Creating consumption decreases feed stock.
-
-    Endpoints:
-        GET     /api/feed/consumption/
-        POST    /api/feed/consumption/
-        GET     /api/feed/consumption/{id}/
-        PATCH   /api/feed/consumption/{id}/
-        PUT     /api/feed/consumption/{id}/
-        DELETE  /api/feed/consumption/{id}/
-    """
+class FeedConsumptionViewSet(
+    viewsets.ModelViewSet
+):
 
     queryset = (
         FeedConsumption.objects
@@ -397,7 +763,10 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
             "created_by",
         )
         .all()
-        .order_by("-date", "-id")
+        .order_by(
+            "-date",
+            "-id",
+        )
     )
 
     serializer_class = FeedConsumptionSerializer
@@ -435,19 +804,29 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
         "-id",
     ]
 
-    def perform_create(self, serializer):
-        """
-        Create consumption and decrease stock.
+    # --------------------------------------------------------
+    # CREATE CONSUMPTION
+    # --------------------------------------------------------
 
-        The system prevents consumption when there is
-        insufficient feed stock.
-        """
+    def perform_create(self, serializer):
 
         with transaction.atomic():
 
-            feed = serializer.validated_data["feed"]
+            feed = serializer.validated_data[
+                "feed"
+            ]
 
-            quantity = serializer.validated_data["quantity"]
+            quantity = serializer.validated_data[
+                "quantity"
+            ]
+
+            if quantity <= 0:
+
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Quantity must be greater than zero."
+                    )
+                })
 
             stock, _ = (
                 FeedStock.objects
@@ -466,22 +845,21 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
 
             if stock.quantity < quantity:
 
-                raise serializers.ValidationError(
-                    {
-                        "quantity": (
-                            f"Insufficient stock. "
-                            f"Available: {stock.quantity} "
-                            f"{feed.unit}."
-                        )
-                    }
-                )
+                raise serializers.ValidationError({
+                    "quantity": (
+                        f"Insufficient stock. "
+                        f"Available: "
+                        f"{stock.quantity} "
+                        f"{feed.unit}."
+                    )
+                })
 
             # ------------------------------------------------
-            # CREATE CONSUMPTION
+            # SAVE CONSUMPTION
             # ------------------------------------------------
 
             serializer.save(
-                created_by=self.request.user,
+                created_by=self.request.user
             )
 
             # ------------------------------------------------
@@ -492,32 +870,17 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
 
             stock.save()
 
+    # --------------------------------------------------------
+    # UPDATE CONSUMPTION
+    # --------------------------------------------------------
 
     def perform_update(self, serializer):
-        """
-        Update consumption and correctly restore/reduce stock.
-
-        Example:
-
-        Existing:
-            Layer Mash consumption = 10kg
-
-        Change to:
-            20kg
-
-        The system:
-
-            1. Returns old 10kg
-            2. Checks availability for new 20kg
-            3. Removes new 20kg
-        """
 
         with transaction.atomic():
 
             old_consumption = self.get_object()
 
             old_feed = old_consumption.feed
-
             old_quantity = old_consumption.quantity
 
             new_feed = serializer.validated_data.get(
@@ -530,9 +893,17 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
                 old_quantity,
             )
 
-            # ------------------------------------------------
+            if new_quantity <= 0:
+
+                raise serializers.ValidationError({
+                    "quantity": (
+                        "Quantity must be greater than zero."
+                    )
+                })
+
+            # =================================================
             # RESTORE OLD CONSUMPTION
-            # ------------------------------------------------
+            # =================================================
 
             old_stock, _ = (
                 FeedStock.objects
@@ -549,9 +920,9 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
 
             old_stock.save()
 
-            # ------------------------------------------------
-            # GET NEW FEED STOCK
-            # ------------------------------------------------
+            # =================================================
+            # APPLY NEW CONSUMPTION
+            # =================================================
 
             new_stock, _ = (
                 FeedStock.objects
@@ -564,42 +935,28 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
                 )
             )
 
-            # ------------------------------------------------
-            # CHECK NEW STOCK
-            # ------------------------------------------------
-
             if new_stock.quantity < new_quantity:
 
-                raise serializers.ValidationError(
-                    {
-                        "quantity": (
-                            f"Insufficient stock. "
-                            f"Available: {new_stock.quantity} "
-                            f"{new_feed.unit}."
-                        )
-                    }
-                )
-
-            # ------------------------------------------------
-            # REMOVE NEW CONSUMPTION
-            # ------------------------------------------------
+                raise serializers.ValidationError({
+                    "quantity": (
+                        f"Insufficient stock. "
+                        f"Available: "
+                        f"{new_stock.quantity} "
+                        f"{new_feed.unit}."
+                    )
+                })
 
             new_stock.quantity -= new_quantity
 
             new_stock.save()
 
-            # ------------------------------------------------
-            # UPDATE CONSUMPTION
-            # ------------------------------------------------
-
             serializer.save()
 
+    # --------------------------------------------------------
+    # DELETE CONSUMPTION
+    # --------------------------------------------------------
 
     def perform_destroy(self, instance):
-        """
-        Delete consumption and return consumed quantity
-        back to stock.
-        """
 
         with transaction.atomic():
 
@@ -614,62 +971,9 @@ class FeedConsumptionViewSet(viewsets.ModelViewSet):
                 )
             )
 
+            # Restore consumed stock
             stock.quantity += instance.quantity
 
             stock.save()
 
             instance.delete()
-
-
-# ============================================================
-# FEED STOCK
-# ============================================================
-
-class FeedStockViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    Read-only feed stock.
-
-    Stock should be changed through purchases and consumption,
-    not manually through this endpoint.
-
-    Endpoints:
-        GET /api/feed/stock/
-        GET /api/feed/stock/{id}/
-    """
-
-    queryset = (
-        FeedStock.objects
-        .select_related("feed")
-        .all()
-        .order_by("feed__name")
-    )
-
-    serializer_class = FeedStockSerializer
-
-    permission_classes = [
-        permissions.IsAuthenticated,
-    ]
-
-    filter_backends = [
-        DjangoFilterBackend,
-        SearchFilter,
-        OrderingFilter,
-    ]
-
-    filterset_fields = [
-        "feed",
-    ]
-
-    search_fields = [
-        "feed__name",
-        "feed__feed_type",
-    ]
-
-    ordering_fields = [
-        "quantity",
-        "last_updated",
-    ]
-
-    ordering = [
-        "feed__name",
-    ]

@@ -1,16 +1,17 @@
-
 from django.urls import include, path
+
 from rest_framework.routers import DefaultRouter
 
 from .views import (
     FeedViewSet,
-    FeedPurchaseViewSet,
     FeedStockViewSet,
+    FeedStockMovementViewSet,
     FeedConsumptionViewSet,
 )
 
 
 router = DefaultRouter()
+
 
 router.register(
     "feeds",
@@ -18,22 +19,25 @@ router.register(
     basename="feeds",
 )
 
-router.register(
-    "purchases",
-    FeedPurchaseViewSet,
-    basename="feed-purchases",
-)
-
-router.register(
-    "consumption",
-    FeedConsumptionViewSet,
-    basename="feed-consumption",
-)
 
 router.register(
     "stock",
     FeedStockViewSet,
     basename="feed-stock",
+)
+
+
+router.register(
+    "movements",
+    FeedStockMovementViewSet,
+    basename="feed-stock-movements",
+)
+
+
+router.register(
+    "consumption",
+    FeedConsumptionViewSet,
+    basename="feed-consumption",
 )
 
 
@@ -43,4 +47,3 @@ urlpatterns = [
         include(router.urls),
     ),
 ]
-

@@ -4,13 +4,35 @@ from django.db import models
 
 from common.models import TimeStampedModel
 from apps.flocks.models import Flock
-from apps.suppliers.models import Supplier
 
+
+# ============================================================
+# FEED TYPE / MASTER
+# ============================================================
 
 class Feed(TimeStampedModel):
-    name = models.CharField(max_length=120)
-    feed_type = models.CharField(max_length=80)
-    unit = models.CharField(max_length=30, default="kg")
+    """
+    Feed master record.
+
+    This only defines the type of feed.
+
+    Financial information such as purchase price,
+    supplier and purchase cost belongs to Expenses/Purchases.
+    """
+
+    name = models.CharField(
+        max_length=120,
+        unique=True,
+    )
+
+    description = models.TextField(
+        blank=True,
+    )
+
+    unit = models.CharField(
+        max_length=30,
+        default="kg",
+    )
 
     minimum_stock = models.DecimalField(
         max_digits=12,
@@ -19,20 +41,28 @@ class Feed(TimeStampedModel):
         validators=[MinValueValidator(0)],
     )
 
-    unit_cost = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=0,
-        validators=[MinValueValidator(0)],
+    active = models.BooleanField(
+        default=True,
     )
-
-    active = models.BooleanField(default=True)
 
     def __str__(self):
         return self.name
 
 
+# ============================================================
+# CURRENT FEED STOCK
+# ============================================================
+
 class FeedStock(TimeStampedModel):
+    """
+    Stores the current physical quantity of each feed.
+
+    Example:
+
+        Broiler Starter = 450 kg
+        Layer Mash      = 820 kg
+    """
+
     feed = models.OneToOneField(
         Feed,
         on_delete=models.CASCADE,
@@ -46,25 +76,48 @@ class FeedStock(TimeStampedModel):
         validators=[MinValueValidator(0)],
     )
 
-    last_updated = models.DateTimeField(auto_now=True)
+    last_updated = models.DateTimeField(
+        auto_now=True,
+    )
 
     def __str__(self):
         return f"{self.feed.name} - {self.quantity} {self.feed.unit}"
 
 
-class FeedPurchase(TimeStampedModel):
+# ============================================================
+# FEED STOCK MOVEMENT
+# ============================================================
+
+class FeedStockMovement(TimeStampedModel):
+    """
+    Records physical feed stock movements.
+
+    Movement types:
+
+        STOCK_IN
+        OPENING_STOCK
+        ADJUSTMENT
+        CONSUMPTION
+
+    Financial purchase information does NOT belong here.
+    """
+
+    MOVEMENT_TYPES = [
+        ("STOCK_IN", "Stock In"),
+        ("OPENING_STOCK", "Opening Stock"),
+        ("ADJUSTMENT", "Adjustment"),
+        ("CONSUMPTION", "Consumption"),
+    ]
+
     feed = models.ForeignKey(
         Feed,
         on_delete=models.PROTECT,
-        related_name="purchases",
+        related_name="stock_movements",
     )
 
-    supplier = models.ForeignKey(
-        Supplier,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="feed_purchases",
+    movement_type = models.CharField(
+        max_length=30,
+        choices=MOVEMENT_TYPES,
     )
 
     date = models.DateField()
@@ -75,20 +128,20 @@ class FeedPurchase(TimeStampedModel):
         validators=[MinValueValidator(0)],
     )
 
-    unit_cost = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        validators=[MinValueValidator(0)],
-    )
-
-    total = models.DecimalField(
-        max_digits=14,
-        decimal_places=2,
-        default=0,
+    flock = models.ForeignKey(
+        Flock,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="feed_stock_movements",
     )
 
     reference = models.CharField(
         max_length=80,
+        blank=True,
+    )
+
+    notes = models.TextField(
         blank=True,
     )
 
@@ -97,14 +150,28 @@ class FeedPurchase(TimeStampedModel):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="feed_purchases_created",
+        related_name="feed_stock_movements_created",
     )
 
     def __str__(self):
-        return f"{self.feed.name} - {self.quantity}"
+        return (
+            f"{self.feed.name} - "
+            f"{self.movement_type} - "
+            f"{self.quantity}"
+        )
 
+
+# ============================================================
+# FEED CONSUMPTION
+# ============================================================
 
 class FeedConsumption(TimeStampedModel):
+    """
+    Records feed consumed by a flock.
+
+    Consumption automatically decreases FeedStock.
+    """
+
     feed = models.ForeignKey(
         Feed,
         on_delete=models.PROTECT,
@@ -125,7 +192,9 @@ class FeedConsumption(TimeStampedModel):
         validators=[MinValueValidator(0)],
     )
 
-    notes = models.TextField(blank=True)
+    notes = models.TextField(
+        blank=True,
+    )
 
     created_by = models.ForeignKey(
         User,
@@ -136,4 +205,8 @@ class FeedConsumption(TimeStampedModel):
     )
 
     def __str__(self):
-        return f"{self.feed.name} - {self.quantity} - {self.flock}"
+        return (
+            f"{self.feed.name} - "
+            f"{self.quantity} - "
+            f"{self.flock}"
+        )
