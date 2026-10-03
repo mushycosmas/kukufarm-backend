@@ -1,4 +1,5 @@
-
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
@@ -63,11 +64,13 @@ urlpatterns = [
         "api/sales/",
         include("apps.sales.urls"),
     ),
-# Sale Payments
+
+    # Sale Payments
     path(
         "api/sale-payments/",
         include("apps.sales.payment_urls"),
     ),
+
     # Expenses
     path(
         "api/expenses/",
@@ -80,10 +83,16 @@ urlpatterns = [
         include("apps.suppliers.urls"),
     ),
 
-    # Reports
+    # Flock Reports
     path(
         "api/reports/",
-        include("apps.reports.urls"),
+        include("apps.flocks.reports.urls"),
+    ),
+
+    # Expense Reports
+    path(
+        "api/reports/",
+        include("apps.expenses.reports.urls"),
     ),
 
     # Settings
@@ -92,3 +101,11 @@ urlpatterns = [
         include("apps.settings.urls"),
     ),
 ]
+
+
+# Serve uploaded media files during development
+if settings.DEBUG:
+    urlpatterns += static(
+        settings.MEDIA_URL,
+        document_root=settings.MEDIA_ROOT,
+    )

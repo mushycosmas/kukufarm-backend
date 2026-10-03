@@ -1,4 +1,4 @@
-from django.core.validators import MinValueValidator
+from django.core.validators import FileExtensionValidator
 from django.db import models
 
 from common.models import TimeStampedModel
@@ -58,6 +58,26 @@ class FarmSettings(TimeStampedModel):
     )
 
     # ---------------------------------------------------------
+    # Farm Logo
+    # ---------------------------------------------------------
+
+    logo = models.ImageField(
+        upload_to="farm/logos/",
+        blank=True,
+        null=True,
+        validators=[
+            FileExtensionValidator(
+                allowed_extensions=[
+                    "jpg",
+                    "jpeg",
+                    "png",
+                    "webp",
+                ]
+            )
+        ],
+    )
+
+    # ---------------------------------------------------------
     # System Preferences
     # ---------------------------------------------------------
 
@@ -110,10 +130,18 @@ class FarmSettings(TimeStampedModel):
         default=False,
     )
 
+    # ---------------------------------------------------------
+    # Meta
+    # ---------------------------------------------------------
+
     class Meta:
         verbose_name = "Farm Settings"
         verbose_name_plural = "Farm Settings"
         ordering = ["id"]
+
+    # ---------------------------------------------------------
+    # String Representation
+    # ---------------------------------------------------------
 
     def __str__(self):
         return self.farm_name or "KukuFarm Settings"

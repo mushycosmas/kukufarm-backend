@@ -4,6 +4,7 @@ from .models import FarmSettings
 
 
 class FarmSettingsSerializer(serializers.ModelSerializer):
+
     class Meta:
         model = FarmSettings
 
@@ -17,6 +18,7 @@ class FarmSettingsSerializer(serializers.ModelSerializer):
             "email",
             "location",
             "address",
+            "logo",
 
             # Preferences
             "currency",
