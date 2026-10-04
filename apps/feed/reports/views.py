@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from xml.sax.saxutils import escape
 
@@ -25,37 +26,52 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from ..models import Flock
+from ..models import (
+    Feed,
+    FeedStock,
+    FeedStockMovement,
+    FeedConsumption,
+)
+
 from apps.settings.models import FarmSettings
 
 
-class FlockPDFReportView(APIView):
+class FeedPDFReportView(APIView):
     """
-    Generate a professional PDF flock report
-    for a selected arrival date range.
+    Generate a professional PDF feed management report
+    for a selected date range.
 
     Endpoint:
-        GET /api/reports/flocks/pdf/
+
+        GET /api/reports/feed/pdf/
 
     Parameters:
+
         from_date=YYYY-MM-DD
         to_date=YYYY-MM-DD
 
     Example:
-        /api/reports/flocks/pdf/
+
+        /api/reports/feed/pdf/
         ?from_date=2026-10-01
         &to_date=2026-10-03
 
     Features:
+
         - Farm settings
         - Farm logo watermark
         - Farm contact information
         - Configurable date format
         - Farm timezone
-        - Flock summary
-        - Bird summary
-        - Flock details
-        - Total quantities
+        - Feed inventory summary
+        - Current feed stock
+        - Stock movement summary
+        - Stock movement details
+        - Feed consumption summary
+        - Feed consumption details
+        - Total stock in
+        - Total consumed
+        - Current stock
         - Page numbers
         - Generated timestamp
         - Inline PDF response
@@ -75,16 +91,41 @@ class FlockPDFReportView(APIView):
         Safely escape text before passing it
         to ReportLab Paragraph.
         """
+
         if value is None:
             return ""
 
-        return escape(str(value))
+        return escape(
+            str(value)
+        )
+
+    @staticmethod
+    def to_decimal(value):
+        """
+        Safely convert a numeric value to Decimal.
+        """
+
+        if value is None:
+            return Decimal("0")
+
+        try:
+            return Decimal(
+                str(value)
+            )
+
+        except (
+            TypeError,
+            ValueError,
+            ArithmeticError,
+        ):
+            return Decimal("0")
 
     @staticmethod
     def parse_date(value):
         """
         Parse YYYY-MM-DD date.
         """
+
         if not value:
             return None
 
@@ -98,9 +139,13 @@ class FlockPDFReportView(APIView):
             return None
 
     @staticmethod
-    def get_farm_timezone(farm_settings):
+    def get_farm_timezone(
+        farm_settings,
+    ):
         """
         Get timezone configured in FarmSettings.
+
+        Falls back to Africa/Dar_es_Salaam.
         """
 
         timezone_name = getattr(
@@ -111,7 +156,8 @@ class FlockPDFReportView(APIView):
 
         try:
             return ZoneInfo(
-                timezone_name or "Africa/Dar_es_Salaam"
+                timezone_name
+                or "Africa/Dar_es_Salaam"
             )
 
         except ZoneInfoNotFoundError:
@@ -125,24 +171,16 @@ class FlockPDFReportView(APIView):
         date_format=None,
     ):
         """
-        Format dates according to FarmSettings.date_format.
-
-        Supported formats:
-            DD/MM/YYYY
-            DD-MM-YYYY
-            DD.MM.YYYY
-            MM/DD/YYYY
-            MM-DD-YYYY
-            YYYY/MM/DD
-            YYYY-MM-DD
-            YYYY.MM.DD
+        Format a date according to FarmSettings.date_format.
         """
 
         if not value:
             return ""
 
-        # datetime -> date
-        if isinstance(value, datetime):
+        if isinstance(
+            value,
+            datetime,
+        ):
             value = value.date()
 
         configured_format = str(
@@ -165,12 +203,18 @@ class FlockPDFReportView(APIView):
             "%d/%m/%Y",
         )
 
-        if hasattr(value, "strftime"):
+        if hasattr(
+            value,
+            "strftime",
+        ):
             return value.strftime(
                 python_format
             )
 
-        if isinstance(value, str):
+        if isinstance(
+            value,
+            str,
+        ):
             value = value.strip()
 
             input_formats = (
@@ -186,10 +230,12 @@ class FlockPDFReportView(APIView):
 
             for input_format in input_formats:
                 try:
-                    parsed_date = datetime.strptime(
-                        value,
-                        input_format,
-                    ).date()
+                    parsed_date = (
+                        datetime.strptime(
+                            value,
+                            input_format,
+                        ).date()
+                    )
 
                     return parsed_date.strftime(
                         python_format
@@ -202,6 +248,27 @@ class FlockPDFReportView(APIView):
 
         return str(value)
 
+    @staticmethod
+    def get_movement_label(
+        movement_type,
+    ):
+        """
+        Convert movement type code into
+        a readable label.
+        """
+
+        labels = {
+            "STOCK_IN": "Stock In",
+            "OPENING_STOCK": "Opening Stock",
+            "ADJUSTMENT": "Adjustment",
+            "CONSUMPTION": "Consumption",
+        }
+
+        return labels.get(
+            movement_type,
+            movement_type or "-",
+        )
+
     # =========================================================
     # PAGE FOOTER + WATERMARK
     # =========================================================
@@ -213,6 +280,7 @@ class FlockPDFReportView(APIView):
     ):
         """
         Add:
+
             - Farm logo watermark
             - Footer line
             - Farm name
@@ -251,7 +319,6 @@ class FlockPDFReportView(APIView):
                     page_height - logo_height
                 ) / 2
 
-                # Very light watermark
                 try:
                     canvas.setFillAlpha(
                         0.07
@@ -270,7 +337,6 @@ class FlockPDFReportView(APIView):
                     mask="auto",
                 )
 
-                # Restore opacity
                 try:
                     canvas.setFillAlpha(
                         1
@@ -283,8 +349,6 @@ class FlockPDFReportView(APIView):
                 AttributeError,
                 OSError,
             ):
-                # If logo cannot be loaded,
-                # continue generating the report.
                 pass
 
         # =====================================================
@@ -303,9 +367,10 @@ class FlockPDFReportView(APIView):
             "",
         )
 
-        # Footer line
         canvas.setStrokeColor(
-            colors.HexColor("#D9D9D9")
+            colors.HexColor(
+                "#D9D9D9"
+            )
         )
 
         canvas.setLineWidth(
@@ -319,31 +384,29 @@ class FlockPDFReportView(APIView):
             13 * mm,
         )
 
-        # Footer font
         canvas.setFont(
             "Helvetica",
             7.5,
         )
 
         canvas.setFillColor(
-            colors.HexColor("#666666")
+            colors.HexColor(
+                "#666666"
+            )
         )
 
-        # Farm name
         canvas.drawString(
             15 * mm,
             8 * mm,
             str(farm_name),
         )
 
-        # Generated timestamp
         canvas.drawCentredString(
             page_width / 2,
             8 * mm,
             generated_text,
         )
 
-        # Page number
         canvas.drawRightString(
             page_width - 15 * mm,
             8 * mm,
@@ -466,93 +529,201 @@ class FlockPDFReportView(APIView):
         )
 
         # =====================================================
-        # GET FLOCKS
+        # GET FEEDS
         # =====================================================
 
-        flocks = (
-            Flock.objects
+        feeds = (
+            Feed.objects
             .filter(
-                arrival_date__gte=start_date,
-                arrival_date__lte=end_date,
+                active=True,
+            )
+            .select_related(
+                "stock",
             )
             .order_by(
-                "arrival_date",
+                "name",
+            )
+        )
+
+        feeds = list(
+            feeds
+        )
+
+        # =====================================================
+        # GET CURRENT STOCK
+        # =====================================================
+
+        feed_stocks = (
+            FeedStock.objects
+            .select_related(
+                "feed",
+            )
+            .order_by(
+                "feed__name",
+            )
+        )
+
+        feed_stocks = list(
+            feed_stocks
+        )
+
+        # =====================================================
+        # GET STOCK MOVEMENTS
+        # =====================================================
+
+        stock_movements = (
+            FeedStockMovement.objects
+            .filter(
+                date__gte=start_date,
+                date__lte=end_date,
+            )
+            .select_related(
+                "feed",
+                "flock",
+                "created_by",
+            )
+            .order_by(
+                "date",
                 "id",
             )
         )
 
-        # Evaluate queryset once
-        flocks = list(flocks)
+        stock_movements = list(
+            stock_movements
+        )
 
         # =====================================================
-        # CALCULATE TOTALS
+        # GET CONSUMPTION
         # =====================================================
 
-        total_flocks = len(
-            flocks
-        )
-
-        active_flocks = sum(
-            1
-            for flock in flocks
-            if str(
-                flock.status or ""
-            ).lower()
-            == "active"
-        )
-
-        sold_flocks = sum(
-            1
-            for flock in flocks
-            if str(
-                flock.status or ""
-            ).lower()
-            == "sold"
-        )
-
-        closed_flocks = sum(
-            1
-            for flock in flocks
-            if str(
-                flock.status or ""
-            ).lower()
-            == "closed"
-        )
-
-        total_initial_quantity = sum(
-            int(
-                flock.initial_quantity or 0
+        consumptions = (
+            FeedConsumption.objects
+            .filter(
+                date__gte=start_date,
+                date__lte=end_date,
             )
-            for flock in flocks
-        )
-
-        total_current_quantity = sum(
-            int(
-                flock.current_quantity or 0
+            .select_related(
+                "feed",
+                "flock",
+                "created_by",
             )
-            for flock in flocks
+            .order_by(
+                "date",
+                "id",
+            )
         )
 
-        total_birds_lost = (
-            total_initial_quantity
-            - total_current_quantity
+        consumptions = list(
+            consumptions
         )
 
-        # Prevent negative loss
-        if total_birds_lost < 0:
-            total_birds_lost = 0
-
         # =====================================================
-        # LOSS PERCENTAGE
+        # CALCULATE CURRENT STOCK
         # =====================================================
 
-        if total_initial_quantity > 0:
-            loss_percentage = (
-                total_birds_lost
-                / total_initial_quantity
-            ) * 100
-        else:
-            loss_percentage = 0
+        total_current_stock = Decimal(
+            "0.00"
+        )
+
+        low_stock_count = 0
+
+        out_of_stock_count = 0
+
+        for stock in feed_stocks:
+            quantity = self.to_decimal(
+                stock.quantity
+            )
+
+            total_current_stock += quantity
+
+            minimum_stock = (
+                self.to_decimal(
+                    stock.feed.minimum_stock
+                )
+            )
+
+            if quantity <= 0:
+                out_of_stock_count += 1
+
+            elif (
+                minimum_stock > 0
+                and quantity <= minimum_stock
+            ):
+                low_stock_count += 1
+
+        # =====================================================
+        # CALCULATE STOCK IN
+        # =====================================================
+
+        total_stock_in = Decimal(
+            "0.00"
+        )
+
+        total_opening_stock = Decimal(
+            "0.00"
+        )
+
+        total_adjustment = Decimal(
+            "0.00"
+        )
+
+        for movement in stock_movements:
+            quantity = self.to_decimal(
+                movement.quantity
+            )
+
+            if (
+                movement.movement_type
+                == "STOCK_IN"
+            ):
+                total_stock_in += quantity
+
+            elif (
+                movement.movement_type
+                == "OPENING_STOCK"
+            ):
+                total_opening_stock += (
+                    quantity
+                )
+
+            elif (
+                movement.movement_type
+                == "ADJUSTMENT"
+            ):
+                total_adjustment += (
+                    quantity
+                )
+
+        # =====================================================
+        # CALCULATE CONSUMPTION
+        # =====================================================
+
+        total_consumed = Decimal(
+            "0.00"
+        )
+
+        for consumption in consumptions:
+            total_consumed += (
+                self.to_decimal(
+                    consumption.quantity
+                )
+            )
+
+        # =====================================================
+        # RECORD COUNTS
+        # =====================================================
+
+        feed_count = len(
+            feeds
+        )
+
+        stock_movement_count = len(
+            stock_movements
+        )
+
+        consumption_count = len(
+            consumptions
+        )
 
         # =====================================================
         # GENERATED TIME
@@ -560,7 +731,9 @@ class FlockPDFReportView(APIView):
 
         generated_at = (
             timezone.now()
-            .astimezone(farm_timezone)
+            .astimezone(
+                farm_timezone
+            )
         )
 
         generated_text = (
@@ -575,7 +748,7 @@ class FlockPDFReportView(APIView):
         # =====================================================
 
         filename = (
-            f"kukufarm-flock-report-"
+            f"kukufarm-feed-report-"
             f"{from_date}-to-{to_date}.pdf"
         )
 
@@ -605,10 +778,12 @@ class FlockPDFReportView(APIView):
             topMargin=18 * mm,
             bottomMargin=20 * mm,
             title=(
-                f"{farm_name} - Flock Report"
+                f"{farm_name} - Feed Report"
             ),
-            author=str(farm_name),
-            subject="Farm Flock Report",
+            author=str(
+                farm_name
+            ),
+            subject="Farm Feed Management Report",
         )
 
         # =====================================================
@@ -625,7 +800,10 @@ class FlockPDFReportView(APIView):
 
         document._logo_path = None
 
-        # Get uploaded farm logo
+        # =====================================================
+        # GET FARM LOGO
+        # =====================================================
+
         if farm_settings:
             logo_file = getattr(
                 farm_settings,
@@ -653,7 +831,7 @@ class FlockPDFReportView(APIView):
         styles = getSampleStyleSheet()
 
         title_style = ParagraphStyle(
-            "ReportTitle",
+            "FeedReportTitle",
             parent=styles["Title"],
             fontName="Helvetica-Bold",
             fontSize=18,
@@ -666,7 +844,7 @@ class FlockPDFReportView(APIView):
         )
 
         subtitle_style = ParagraphStyle(
-            "ReportSubtitle",
+            "FeedReportSubtitle",
             parent=styles["Normal"],
             fontName="Helvetica",
             fontSize=9,
@@ -679,7 +857,7 @@ class FlockPDFReportView(APIView):
         )
 
         section_style = ParagraphStyle(
-            "ReportSection",
+            "FeedReportSection",
             parent=styles["Heading2"],
             fontName="Helvetica-Bold",
             fontSize=11,
@@ -692,7 +870,7 @@ class FlockPDFReportView(APIView):
         )
 
         normal_style = ParagraphStyle(
-            "ReportNormal",
+            "FeedReportNormal",
             parent=styles["Normal"],
             fontName="Helvetica",
             fontSize=8.2,
@@ -700,19 +878,19 @@ class FlockPDFReportView(APIView):
         )
 
         center_style = ParagraphStyle(
-            "ReportCenter",
+            "FeedReportCenter",
             parent=normal_style,
             alignment=TA_CENTER,
         )
 
         right_style = ParagraphStyle(
-            "ReportRight",
+            "FeedReportRight",
             parent=normal_style,
             alignment=TA_RIGHT,
         )
 
         small_style = ParagraphStyle(
-            "ReportSmall",
+            "FeedReportSmall",
             parent=styles["Normal"],
             fontName="Helvetica",
             fontSize=7.5,
@@ -751,7 +929,7 @@ class FlockPDFReportView(APIView):
 
         story.append(
             Paragraph(
-                "FLOCK REPORT",
+                "FEED MANAGEMENT REPORT",
                 title_style,
             )
         )
@@ -778,7 +956,7 @@ class FlockPDFReportView(APIView):
         # GENERATED DATE
         # =====================================================
 
-        generated_text_body = (
+        generated_body_text = (
             "<b>Generated:</b> "
             + generated_at.strftime(
                 "%d %B %Y %H:%M"
@@ -787,7 +965,7 @@ class FlockPDFReportView(APIView):
 
         story.append(
             Paragraph(
-                generated_text_body,
+                generated_body_text,
                 subtitle_style,
             )
         )
@@ -862,14 +1040,12 @@ class FlockPDFReportView(APIView):
                 )
 
             if farm_information:
-                farm_info_text = " | ".join(
-                    farm_information
-                )
-
                 story.append(
                     Paragraph(
                         self.escape_text(
-                            farm_info_text
+                            " | ".join(
+                                farm_information
+                            )
                         ),
                         small_style,
                     )
@@ -883,12 +1059,12 @@ class FlockPDFReportView(APIView):
                 )
 
         # =====================================================
-        # FLOCK SUMMARY
+        # FEED SUMMARY
         # =====================================================
 
         story.append(
             Paragraph(
-                "Flock Summary",
+                "Feed Summary",
                 section_style,
             )
         )
@@ -896,38 +1072,38 @@ class FlockPDFReportView(APIView):
         summary_data = [
             [
                 Paragraph(
-                    "<b>Total Flocks</b>",
+                    "<b>Feed Types</b>",
                     normal_style,
                 ),
                 Paragraph(
-                    "<b>Active</b>",
+                    "<b>Current Stock</b>",
                     normal_style,
                 ),
                 Paragraph(
-                    "<b>Sold</b>",
+                    "<b>Total Stock In</b>",
                     normal_style,
                 ),
                 Paragraph(
-                    "<b>Closed</b>",
+                    "<b>Total Consumed</b>",
                     normal_style,
                 ),
             ],
             [
                 Paragraph(
-                    str(total_flocks),
+                    str(feed_count),
                     center_style,
                 ),
                 Paragraph(
-                    str(active_flocks),
-                    center_style,
+                    f"{total_current_stock:,.2f}",
+                    right_style,
                 ),
                 Paragraph(
-                    str(sold_flocks),
-                    center_style,
+                    f"{total_stock_in:,.2f}",
+                    right_style,
                 ),
                 Paragraph(
-                    str(closed_flocks),
-                    center_style,
+                    f"{total_consumed:,.2f}",
+                    right_style,
                 ),
             ],
         ]
@@ -978,13 +1154,13 @@ class FlockPDFReportView(APIView):
                         "LEFTPADDING",
                         (0, 0),
                         (-1, -1),
-                        6,
+                        5,
                     ),
                     (
                         "RIGHTPADDING",
                         (0, 0),
                         (-1, -1),
-                        6,
+                        5,
                     ),
                     (
                         "TOPPADDING",
@@ -1009,62 +1185,62 @@ class FlockPDFReportView(APIView):
         story.append(
             Spacer(
                 1,
-                5 * mm,
+                6 * mm,
             )
         )
 
         # =====================================================
-        # BIRD SUMMARY
+        # STOCK STATUS SUMMARY
         # =====================================================
 
         story.append(
             Paragraph(
-                "Bird Summary",
+                "Stock Status",
                 section_style,
             )
         )
 
-        bird_summary_data = [
+        stock_status_data = [
             [
                 Paragraph(
-                    "<b>Initial Birds</b>",
+                    "<b>Total Feed Types</b>",
                     normal_style,
                 ),
                 Paragraph(
-                    "<b>Current Birds</b>",
+                    "<b>Low Stock</b>",
                     normal_style,
                 ),
                 Paragraph(
-                    "<b>Birds Lost</b>",
+                    "<b>Out of Stock</b>",
                     normal_style,
                 ),
                 Paragraph(
-                    "<b>Loss %</b>",
+                    "<b>Adjustments</b>",
                     normal_style,
                 ),
             ],
             [
                 Paragraph(
-                    f"{total_initial_quantity:,}",
+                    str(feed_count),
                     center_style,
                 ),
                 Paragraph(
-                    f"{total_current_quantity:,}",
+                    str(low_stock_count),
                     center_style,
                 ),
                 Paragraph(
-                    f"{total_birds_lost:,}",
+                    str(out_of_stock_count),
                     center_style,
                 ),
                 Paragraph(
-                    f"{loss_percentage:.2f}%",
-                    center_style,
+                    f"{total_adjustment:,.2f}",
+                    right_style,
                 ),
             ],
         ]
 
-        bird_summary_table = Table(
-            bird_summary_data,
+        stock_status_table = Table(
+            stock_status_data,
             colWidths=[
                 40 * mm,
                 40 * mm,
@@ -1073,7 +1249,7 @@ class FlockPDFReportView(APIView):
             ],
         )
 
-        bird_summary_table.setStyle(
+        stock_status_table.setStyle(
             TableStyle(
                 [
                     (
@@ -1109,13 +1285,13 @@ class FlockPDFReportView(APIView):
                         "LEFTPADDING",
                         (0, 0),
                         (-1, -1),
-                        6,
+                        5,
                     ),
                     (
                         "RIGHTPADDING",
                         (0, 0),
                         (-1, -1),
-                        6,
+                        5,
                     ),
                     (
                         "TOPPADDING",
@@ -1134,7 +1310,7 @@ class FlockPDFReportView(APIView):
         )
 
         story.append(
-            bird_summary_table
+            stock_status_table
         )
 
         story.append(
@@ -1145,61 +1321,37 @@ class FlockPDFReportView(APIView):
         )
 
         # =====================================================
-        # FLOCK DETAILS
+        # CURRENT FEED INVENTORY
         # =====================================================
 
         story.append(
             Paragraph(
-                "Flock Details",
+                "Current Feed Inventory",
                 section_style,
             )
         )
 
-        # =====================================================
-        # TABLE HEADER
-        # =====================================================
-
-        table_data = [
+        inventory_data = [
             [
                 Paragraph(
                     "<b>#</b>",
                     center_style,
                 ),
                 Paragraph(
-                    "<b>Code</b>",
+                    "<b>Feed</b>",
                     normal_style,
                 ),
                 Paragraph(
-                    "<b>Flock Name</b>",
-                    normal_style,
-                ),
-                Paragraph(
-                    "<b>Breed</b>",
-                    normal_style,
-                ),
-                Paragraph(
-                    "<b>Source</b>",
-                    normal_style,
-                ),
-                Paragraph(
-                    "<b>Arrival Date</b>",
-                    normal_style,
-                ),
-                Paragraph(
-                    "<b>Initial Qty</b>",
-                    right_style,
-                ),
-                Paragraph(
-                    "<b>Current Qty</b>",
-                    right_style,
-                ),
-                Paragraph(
-                    "<b>Age (Weeks)</b>",
+                    "<b>Unit</b>",
                     center_style,
                 ),
                 Paragraph(
-                    "<b>House</b>",
-                    normal_style,
+                    "<b>Minimum</b>",
+                    right_style,
+                ),
+                Paragraph(
+                    "<b>Current Stock</b>",
+                    right_style,
                 ),
                 Paragraph(
                     "<b>Status</b>",
@@ -1208,133 +1360,59 @@ class FlockPDFReportView(APIView):
             ]
         ]
 
-        # =====================================================
-        # FLOCK ROWS
-        # =====================================================
-
-        for index, flock in enumerate(
-            flocks,
+        for index, stock in enumerate(
+            feed_stocks,
             start=1,
         ):
-            code = self.escape_text(
-                getattr(
-                    flock,
-                    "code",
-                    None,
+            feed = stock.feed
+
+            quantity = self.to_decimal(
+                stock.quantity
+            )
+
+            minimum_stock = (
+                self.to_decimal(
+                    feed.minimum_stock
                 )
-                or "-"
             )
 
-            name = self.escape_text(
-                getattr(
-                    flock,
-                    "name",
-                    None,
-                )
-                or "-"
-            )
+            if quantity <= 0:
+                status = "OUT OF STOCK"
 
-            breed = self.escape_text(
-                getattr(
-                    flock,
-                    "breed",
-                    None,
-                )
-                or "-"
-            )
+            elif (
+                minimum_stock > 0
+                and quantity <= minimum_stock
+            ):
+                status = "LOW STOCK"
 
-            source = self.escape_text(
-                getattr(
-                    flock,
-                    "source",
-                    None,
-                )
-                or "-"
-            )
+            else:
+                status = "AVAILABLE"
 
-            house = self.escape_text(
-                getattr(
-                    flock,
-                    "house",
-                    None,
-                )
-                or "-"
-            )
-
-            raw_status = getattr(
-                flock,
-                "status",
-                None,
-            )
-
-            status = self.escape_text(
-                str(
-                    raw_status or "-"
-                ).title()
-            )
-
-            flock_date = (
-                self.format_report_date(
-                    flock.arrival_date,
-                    date_format,
-                )
-                if flock.arrival_date
-                else "-"
-            )
-
-            initial_quantity = int(
-                flock.initial_quantity or 0
-            )
-
-            current_quantity = int(
-                flock.current_quantity or 0
-            )
-
-            age_weeks = int(
-                flock.age_weeks or 0
-            )
-
-            table_data.append(
+            inventory_data.append(
                 [
                     Paragraph(
                         str(index),
                         center_style,
                     ),
                     Paragraph(
-                        code,
+                        self.escape_text(
+                            feed.name
+                        ),
                         normal_style,
                     ),
                     Paragraph(
-                        name,
-                        normal_style,
-                    ),
-                    Paragraph(
-                        breed,
-                        normal_style,
-                    ),
-                    Paragraph(
-                        source,
-                        normal_style,
-                    ),
-                    Paragraph(
-                        flock_date,
-                        normal_style,
-                    ),
-                    Paragraph(
-                        f"{initial_quantity:,}",
-                        right_style,
-                    ),
-                    Paragraph(
-                        f"{current_quantity:,}",
-                        right_style,
-                    ),
-                    Paragraph(
-                        str(age_weeks),
+                        self.escape_text(
+                            feed.unit
+                        ),
                         center_style,
                     ),
                     Paragraph(
-                        house,
-                        normal_style,
+                        f"{minimum_stock:,.2f}",
+                        right_style,
+                    ),
+                    Paragraph(
+                        f"{quantity:,.2f}",
+                        right_style,
                     ),
                     Paragraph(
                         status,
@@ -1343,23 +1421,14 @@ class FlockPDFReportView(APIView):
                 ]
             )
 
-        # =====================================================
-        # EMPTY REPORT
-        # =====================================================
-
-        if total_flocks == 0:
-            table_data.append(
+        if not feed_stocks:
+            inventory_data.append(
                 [
                     "",
-                    "",
                     Paragraph(
-                        "No flocks found for the selected date range.",
+                        "No feed stock records found.",
                         center_style,
                     ),
-                    "",
-                    "",
-                    "",
-                    "",
                     "",
                     "",
                     "",
@@ -1367,65 +1436,22 @@ class FlockPDFReportView(APIView):
                 ]
             )
 
-        # =====================================================
-        # TOTAL ROW
-        # =====================================================
-
-        table_data.append(
-            [
-                "",
-                "",
-                "",
-                "",
-                "",
-                Paragraph(
-                    "<b>TOTAL</b>",
-                    right_style,
-                ),
-                Paragraph(
-                    f"<b>{total_initial_quantity:,}</b>",
-                    right_style,
-                ),
-                Paragraph(
-                    f"<b>{total_current_quantity:,}</b>",
-                    right_style,
-                ),
-                "",
-                "",
-                "",
-            ]
-        )
-
-        # =====================================================
-        # FLOCK TABLE
-        # =====================================================
-
-        flock_table = Table(
-            table_data,
+        inventory_table = Table(
+            inventory_data,
             colWidths=[
-                8 * mm,
+                10 * mm,
+                55 * mm,
                 20 * mm,
-                31 * mm,
-                25 * mm,
-                25 * mm,
-                25 * mm,
-                23 * mm,
-                23 * mm,
-                22 * mm,
-                25 * mm,
-                22 * mm,
+                30 * mm,
+                35 * mm,
+                30 * mm,
             ],
             repeatRows=1,
-            repeatCols=0,
         )
 
-        flock_table.setStyle(
+        inventory_table.setStyle(
             TableStyle(
                 [
-                    # -------------------------------------------------
-                    # HEADER
-                    # -------------------------------------------------
-
                     (
                         "BACKGROUND",
                         (0, 0),
@@ -1440,11 +1466,6 @@ class FlockPDFReportView(APIView):
                         (-1, 0),
                         colors.white,
                     ),
-
-                    # -------------------------------------------------
-                    # GRID
-                    # -------------------------------------------------
-
                     (
                         "GRID",
                         (0, 0),
@@ -1454,75 +1475,510 @@ class FlockPDFReportView(APIView):
                             "#cccccc"
                         ),
                     ),
-
-                    # -------------------------------------------------
-                    # ALIGNMENT
-                    # -------------------------------------------------
-
                     (
                         "VALIGN",
                         (0, 0),
                         (-1, -1),
                         "MIDDLE",
                     ),
-
-                    (
-                        "ALIGN",
-                        (0, 0),
-                        (0, -1),
-                        "CENTER",
-                    ),
-
-                    (
-                        "ALIGN",
-                        (5, 1),
-                        (8, -1),
-                        "CENTER",
-                    ),
-
-                    (
-                        "ALIGN",
-                        (10, 1),
-                        (10, -1),
-                        "CENTER",
-                    ),
-
-                    # -------------------------------------------------
-                    # PADDING
-                    # -------------------------------------------------
-
                     (
                         "LEFTPADDING",
                         (0, 0),
                         (-1, -1),
                         4,
                     ),
-
                     (
                         "RIGHTPADDING",
                         (0, 0),
                         (-1, -1),
                         4,
                     ),
-
                     (
                         "TOPPADDING",
                         (0, 0),
                         (-1, -1),
                         5,
                     ),
-
                     (
                         "BOTTOMPADDING",
                         (0, 0),
                         (-1, -1),
                         5,
                     ),
+                    (
+                        "ROWBACKGROUNDS",
+                        (0, 1),
+                        (-1, -1),
+                        [
+                            colors.white,
+                            colors.HexColor(
+                                "#f8f9fa"
+                            ),
+                        ],
+                    ),
+                ]
+            )
+        )
 
-                    # -------------------------------------------------
-                    # ALTERNATING ROWS
-                    # -------------------------------------------------
+        story.append(
+            inventory_table
+        )
 
+        story.append(
+            Spacer(
+                1,
+                8 * mm,
+            )
+        )
+
+        # =====================================================
+        # STOCK MOVEMENTS
+        # =====================================================
+
+        story.append(
+            Paragraph(
+                "Feed Stock Movements",
+                section_style,
+            )
+        )
+
+        movement_data = [
+            [
+                Paragraph(
+                    "<b>#</b>",
+                    center_style,
+                ),
+                Paragraph(
+                    "<b>Date</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Feed</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Movement</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Quantity</b>",
+                    right_style,
+                ),
+                Paragraph(
+                    "<b>Reference</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Notes</b>",
+                    normal_style,
+                ),
+            ]
+        ]
+
+        for index, movement in enumerate(
+            stock_movements,
+            start=1,
+        ):
+            feed_name = (
+                movement.feed.name
+                if movement.feed
+                else "-"
+            )
+
+            movement_label = (
+                self.get_movement_label(
+                    movement.movement_type
+                )
+            )
+
+            reference = (
+                movement.reference
+                or "-"
+            )
+
+            notes = (
+                movement.notes
+                or "-"
+            )
+
+            movement_date = (
+                self.format_report_date(
+                    movement.date,
+                    date_format,
+                )
+                if movement.date
+                else "-"
+            )
+
+            quantity = self.to_decimal(
+                movement.quantity
+            )
+
+            movement_data.append(
+                [
+                    Paragraph(
+                        str(index),
+                        center_style,
+                    ),
+                    Paragraph(
+                        movement_date,
+                        normal_style,
+                    ),
+                    Paragraph(
+                        self.escape_text(
+                            feed_name
+                        ),
+                        normal_style,
+                    ),
+                    Paragraph(
+                        self.escape_text(
+                            movement_label
+                        ),
+                        normal_style,
+                    ),
+                    Paragraph(
+                        f"{quantity:,.2f}",
+                        right_style,
+                    ),
+                    Paragraph(
+                        self.escape_text(
+                            reference
+                        ),
+                        normal_style,
+                    ),
+                    Paragraph(
+                        self.escape_text(
+                            notes
+                        ),
+                        normal_style,
+                    ),
+                ]
+            )
+
+        if not stock_movements:
+            movement_data.append(
+                [
+                    "",
+                    "",
+                    Paragraph(
+                        "No feed stock movements found for the selected date range.",
+                        center_style,
+                    ),
+                    "",
+                    "",
+                    "",
+                    "",
+                ]
+            )
+
+        movement_table = Table(
+            movement_data,
+            colWidths=[
+                8 * mm,
+                23 * mm,
+                35 * mm,
+                30 * mm,
+                25 * mm,
+                28 * mm,
+                41 * mm,
+            ],
+            repeatRows=1,
+        )
+
+        movement_table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (-1, 0),
+                        colors.HexColor(
+                            "#212529"
+                        ),
+                    ),
+                    (
+                        "TEXTCOLOR",
+                        (0, 0),
+                        (-1, 0),
+                        colors.white,
+                    ),
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.4,
+                        colors.HexColor(
+                            "#cccccc"
+                        ),
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "MIDDLE",
+                    ),
+                    (
+                        "LEFTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        3,
+                    ),
+                    (
+                        "RIGHTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        3,
+                    ),
+                    (
+                        "TOPPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
+                    (
+                        "BOTTOMPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
+                    (
+                        "ROWBACKGROUNDS",
+                        (0, 1),
+                        (-1, -1),
+                        [
+                            colors.white,
+                            colors.HexColor(
+                                "#f8f9fa"
+                            ),
+                        ],
+                    ),
+                ]
+            )
+        )
+
+        story.append(
+            movement_table
+        )
+
+        story.append(
+            Spacer(
+                1,
+                8 * mm,
+            )
+        )
+
+        # =====================================================
+        # FEED CONSUMPTION
+        # =====================================================
+
+        story.append(
+            Paragraph(
+                "Feed Consumption",
+                section_style,
+            )
+        )
+
+        consumption_data = [
+            [
+                Paragraph(
+                    "<b>#</b>",
+                    center_style,
+                ),
+                Paragraph(
+                    "<b>Date</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Feed</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Flock</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Quantity</b>",
+                    right_style,
+                ),
+                Paragraph(
+                    "<b>Notes</b>",
+                    normal_style,
+                ),
+            ]
+        ]
+
+        for index, consumption in enumerate(
+            consumptions,
+            start=1,
+        ):
+            feed_name = (
+                consumption.feed.name
+                if consumption.feed
+                else "-"
+            )
+
+            flock_name = (
+                str(
+                    consumption.flock
+                )
+                if consumption.flock
+                else "-"
+            )
+
+            notes = (
+                consumption.notes
+                or "-"
+            )
+
+            consumption_date = (
+                self.format_report_date(
+                    consumption.date,
+                    date_format,
+                )
+                if consumption.date
+                else "-"
+            )
+
+            quantity = self.to_decimal(
+                consumption.quantity
+            )
+
+            consumption_data.append(
+                [
+                    Paragraph(
+                        str(index),
+                        center_style,
+                    ),
+                    Paragraph(
+                        consumption_date,
+                        normal_style,
+                    ),
+                    Paragraph(
+                        self.escape_text(
+                            feed_name
+                        ),
+                        normal_style,
+                    ),
+                    Paragraph(
+                        self.escape_text(
+                            flock_name
+                        ),
+                        normal_style,
+                    ),
+                    Paragraph(
+                        f"{quantity:,.2f}",
+                        right_style,
+                    ),
+                    Paragraph(
+                        self.escape_text(
+                            notes
+                        ),
+                        normal_style,
+                    ),
+                ]
+            )
+
+        if not consumptions:
+            consumption_data.append(
+                [
+                    "",
+                    "",
+                    Paragraph(
+                        "No feed consumption records found for the selected date range.",
+                        center_style,
+                    ),
+                    "",
+                    "",
+                    "",
+                ]
+            )
+
+        consumption_data.append(
+            [
+                "",
+                "",
+                "",
+                Paragraph(
+                    "<b>TOTAL CONSUMED</b>",
+                    right_style,
+                ),
+                Paragraph(
+                    f"<b>{total_consumed:,.2f}</b>",
+                    right_style,
+                ),
+                "",
+            ]
+        )
+
+        consumption_table = Table(
+            consumption_data,
+            colWidths=[
+                10 * mm,
+                25 * mm,
+                45 * mm,
+                35 * mm,
+                30 * mm,
+                35 * mm,
+            ],
+            repeatRows=1,
+        )
+
+        consumption_table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (-1, 0),
+                        colors.HexColor(
+                            "#212529"
+                        ),
+                    ),
+                    (
+                        "TEXTCOLOR",
+                        (0, 0),
+                        (-1, 0),
+                        colors.white,
+                    ),
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.4,
+                        colors.HexColor(
+                            "#cccccc"
+                        ),
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "MIDDLE",
+                    ),
+                    (
+                        "LEFTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        4,
+                    ),
+                    (
+                        "RIGHTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        4,
+                    ),
+                    (
+                        "TOPPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
+                    (
+                        "BOTTOMPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
                     (
                         "ROWBACKGROUNDS",
                         (0, 1),
@@ -1534,11 +1990,6 @@ class FlockPDFReportView(APIView):
                             ),
                         ],
                     ),
-
-                    # -------------------------------------------------
-                    # TOTAL ROW
-                    # -------------------------------------------------
-
                     (
                         "BACKGROUND",
                         (0, -1),
@@ -1547,7 +1998,6 @@ class FlockPDFReportView(APIView):
                             "#f2f2f2"
                         ),
                     ),
-
                     (
                         "LINEABOVE",
                         (0, -1),
@@ -1562,7 +2012,7 @@ class FlockPDFReportView(APIView):
         )
 
         story.append(
-            flock_table
+            consumption_table
         )
 
         story.append(
@@ -1584,10 +2034,14 @@ class FlockPDFReportView(APIView):
         )
 
         notes_text = (
-            "Bird loss is calculated as Initial Birds "
-            "less Current Birds. The loss percentage "
-            "is calculated against the total initial "
-            "bird population within the selected date range."
+            "This report contains feed inventory, "
+            "stock movements and feed consumption "
+            "records within the selected date range. "
+            "Current stock represents the physical "
+            "feed quantity currently recorded in "
+            "the FeedStock records. Feed consumption "
+            "is reported separately from stock movements "
+            "to avoid double counting."
         )
 
         story.append(

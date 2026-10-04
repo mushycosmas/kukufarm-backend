@@ -5,88 +5,140 @@ from django.urls import include, path
 
 
 urlpatterns = [
-    # Admin
+    # ============================================================
+    # ADMIN
+    # ============================================================
     path(
         "admin/",
         admin.site.urls,
     ),
 
-    # Authentication
+    # ============================================================
+    # AUTHENTICATION
+    # ============================================================
     path(
         "api/auth/",
         include("apps.accounts.urls"),
     ),
 
-    # Accounts
+    # ============================================================
+    # ACCOUNTS
+    # ============================================================
     path(
         "api/accounts/",
         include("apps.accounts.api_urls"),
     ),
 
-    # Flocks
+    # ============================================================
+    # FLOCKS
+    # ============================================================
     path(
         "api/flocks/",
         include("apps.flocks.urls"),
     ),
 
-    # Egg Production
+    # ============================================================
+    # EGG PRODUCTION
+    # ============================================================
     path(
         "api/production/",
         include("apps.production.urls"),
     ),
 
-    # Egg Inventory
+    # ============================================================
+    # EGG INVENTORY
+    # ============================================================
     path(
         "api/egg-inventory/",
         include("apps.production.inventory_urls"),
     ),
 
-    # Feed
+    # ============================================================
+    # FEED
+    # ============================================================
     path(
         "api/feed/",
         include("apps.feed.urls"),
     ),
-
-    # Health
+    path(
+         "api/reports/",
+        include("apps.feed.reports.urls"),
+    ),
+    # ============================================================
+    # HEALTH
+    # ============================================================
     path(
         "api/health/",
         include("apps.health.urls"),
     ),
+    path(
+    "api/reports/",
+    include("apps.health.reports.urls"),
+    ),
 
-    # Customers
+    # ============================================================
+    # CUSTOMERS
+    # ============================================================
     path(
         "api/customers/",
         include("apps.customers.urls"),
     ),
-
-    # Sales
+    path(
+        "api/reports/",
+        include("apps.customers.reports.urls"),
+    ),
+    # ============================================================
+    # SALES
+    # ============================================================
     path(
         "api/sales/",
         include("apps.sales.urls"),
     ),
-
-    # Sale Payments
+    path(
+        "api/reports/",
+        include("apps.sales.reports.urls"),
+    ),
+    # ============================================================
+    # SALE PAYMENTS
+    # ============================================================
     path(
         "api/sale-payments/",
         include("apps.sales.payment_urls"),
     ),
 
-    # Expenses
+    # ============================================================
+    # EXPENSES
+    # ============================================================
     path(
         "api/expenses/",
         include("apps.expenses.urls"),
     ),
 
-    # Suppliers
+    # ============================================================
+    # SUPPLIERS
+    # ============================================================
     path(
         "api/suppliers/",
         include("apps.suppliers.urls"),
     ),
+    path(
+        "api/reports/",
+        include("apps.suppliers.reports.urls"),
+    ),
+    # ============================================================
+    # REPORTS
+    # ============================================================
 
     # Flock Reports
     path(
         "api/reports/",
         include("apps.flocks.reports.urls"),
+    ),
+
+    # Egg Production & Egg Inventory Reports
+    path(
+        "api/reports/",
+        include("apps.production.reports.urls"),
     ),
 
     # Expense Reports
@@ -95,7 +147,9 @@ urlpatterns = [
         include("apps.expenses.reports.urls"),
     ),
 
-    # Settings
+    # ============================================================
+    # SETTINGS
+    # ============================================================
     path(
         "api/settings/",
         include("apps.settings.urls"),
@@ -103,7 +157,9 @@ urlpatterns = [
 ]
 
 
-# Serve uploaded media files during development
+# ================================================================
+# MEDIA FILES - DEVELOPMENT ONLY
+# ================================================================
 if settings.DEBUG:
     urlpatterns += static(
         settings.MEDIA_URL,
