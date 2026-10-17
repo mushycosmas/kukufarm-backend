@@ -9,19 +9,16 @@ class UserSerializer(serializers.ModelSerializer):
     """
     Read-only representation of a KukuFarm user.
 
-    Returns the user's dynamic Role as an object and also
-    exposes role_id for frontend form handling.
+    Returns user details, assigned role, profile information,
+    and the permission codes assigned to the user's role.
     """
 
     role = serializers.SerializerMethodField()
-
     role_id = serializers.SerializerMethodField()
-
     phone = serializers.SerializerMethodField()
-
     job_title = serializers.SerializerMethodField()
-
     active = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -39,12 +36,13 @@ class UserSerializer(serializers.ModelSerializer):
             "job_title",
             "active",
             "date_joined",
+            "permissions",
         ]
 
+        read_only_fields = fields
+
     def get_role(self, obj):
-        """
-        Return the user's role as an object.
-        """
+        """Return the assigned role as an object."""
 
         profile = getattr(obj, "profile", None)
 
@@ -58,9 +56,7 @@ class UserSerializer(serializers.ModelSerializer):
         }
 
     def get_role_id(self, obj):
-        """
-        Return the database Role ID.
-        """
+        """Return the assigned role's database ID."""
 
         profile = getattr(obj, "profile", None)
 
@@ -70,33 +66,27 @@ class UserSerializer(serializers.ModelSerializer):
         return profile.role_id
 
     def get_phone(self, obj):
-        """
-        Return user's phone number.
-        """
+        """Return the user's phone number."""
 
         profile = getattr(obj, "profile", None)
 
         if not profile:
             return ""
 
-        return profile.phone
+        return profile.phone or ""
 
     def get_job_title(self, obj):
-        """
-        Return user's job title.
-        """
+        """Return the user's job title."""
 
         profile = getattr(obj, "profile", None)
 
         if not profile:
             return ""
 
-        return profile.job_title
+        return profile.job_title or ""
 
     def get_active(self, obj):
-        """
-        Return UserProfile active status.
-        """
+        """Return the UserProfile active status."""
 
         profile = getattr(obj, "profile", None)
 
@@ -105,24 +95,48 @@ class UserSerializer(serializers.ModelSerializer):
 
         return profile.active
 
+    def get_permissions(self, obj):
+        """
+        Return permission codes assigned to the user's role.
+
+        Example:
+            [
+                "customers.view_customer",
+                "customers.add_customer"
+            ]
+        """
+
+        profile = getattr(obj, "profile", None)
+
+        if not profile or not profile.role:
+            return []
+
+        permissions = (
+            profile.role.permissions
+            .select_related("content_type")
+            .all()
+        )
+
+        return sorted(
+            f"{permission.content_type.app_label}."
+            f"{permission.codename}"
+            for permission in permissions
+        )
+
 
 class UserCreateSerializer(serializers.ModelSerializer):
     """
-    Serializer used when creating or updating KukuFarm users.
+    Serializer for creating and updating KukuFarm users.
 
-    The frontend sends:
-
-        role_id: 1
-
-    which is mapped to:
-
-        UserProfile.role
+    The frontend sends role_id, which maps to UserProfile.role.
+    Profile fields are saved to the associated UserProfile.
     """
 
     password = serializers.CharField(
         write_only=True,
         min_length=6,
         required=False,
+        allow_blank=False,
     )
 
     role_id = serializers.PrimaryKeyRelatedField(
@@ -167,26 +181,17 @@ class UserCreateSerializer(serializers.ModelSerializer):
         ]
 
     def create(self, validated_data):
-        """
-        Create a User together with UserProfile.
-        """
+        """Create a user and its associated profile."""
 
-        profile_data = validated_data.pop(
-            "profile",
-            {},
-        )
+        profile_data = validated_data.pop("profile", {})
+        password = validated_data.pop("password", None)
 
-        password = validated_data.pop(
-            "password",
-            None,
-        )
-
-        user = User.objects.create(
-            **validated_data
-        )
+        user = User(**validated_data)
 
         if password:
             user.set_password(password)
+        else:
+            user.set_unusable_password()
 
         user.save()
 
@@ -198,46 +203,29 @@ class UserCreateSerializer(serializers.ModelSerializer):
         return user
 
     def update(self, instance, validated_data):
-        """
-        Update User and UserProfile.
-        """
+        """Update user details and associated profile fields."""
 
-        profile_data = validated_data.pop(
-            "profile",
-            {},
-        )
+        profile_data = validated_data.pop("profile", {})
+        password = validated_data.pop("password", None)
 
-        password = validated_data.pop(
-            "password",
-            None,
-        )
+        # Update Django User fields.
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
 
-        # Update Django User fields
-        for key, value in validated_data.items():
-            setattr(
-                instance,
-                key,
-                value,
-            )
-
-        # Update password correctly
+        # Update the password only when a new one is supplied.
         if password:
             instance.set_password(password)
 
         instance.save()
 
-        # Get or create UserProfile
+        # Get or create the user's profile.
         profile, _ = UserProfile.objects.get_or_create(
             user=instance,
         )
 
-        # Update profile fields
-        for key, value in profile_data.items():
-            setattr(
-                profile,
-                key,
-                value,
-            )
+        # Update supplied profile fields only.
+        for field, value in profile_data.items():
+            setattr(profile, field, value)
 
         profile.save()
 
@@ -248,7 +236,7 @@ class RoleSerializer(serializers.ModelSerializer):
     """
     Serializer for dynamic KukuFarm roles.
 
-    CREATE / UPDATE request:
+    Incoming requests use permission IDs:
 
         {
             "name": "Farm Manager",
@@ -258,9 +246,7 @@ class RoleSerializer(serializers.ModelSerializer):
             "permissions": [1, 2, 3, 4]
         }
 
-    The frontend sends permission IDs.
-
-    API response returns detailed permission objects.
+    API responses return detailed permission objects.
     """
 
     permissions = serializers.PrimaryKeyRelatedField(
@@ -290,13 +276,14 @@ class RoleSerializer(serializers.ModelSerializer):
         ]
 
     def to_representation(self, instance):
-        """
-        Convert permission IDs into detailed permission
-        objects when returning data to React.
-        """
+        """Return detailed permission information to React."""
 
-        representation = super().to_representation(
-            instance
+        representation = super().to_representation(instance)
+
+        permissions = (
+            instance.permissions
+            .select_related("content_type")
+            .all()
         )
 
         representation["permissions"] = [
@@ -310,9 +297,7 @@ class RoleSerializer(serializers.ModelSerializer):
                 "codename": permission.codename,
                 "app_label": permission.content_type.app_label,
             }
-            for permission in instance.permissions.select_related(
-                "content_type"
-            ).all()
+            for permission in permissions
         ]
 
         return representation
